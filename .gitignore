@@ -1,0 +1,13 @@
+node_modules
+dist
+*.part
+.DS_Store
+# Downloaded by `npm run assets` (Poly Haven + three.js examples)
+public/assets/*
+# ...except the Sketchfab CC-BY models exported via Blender, which the script can't fetch
+!public/assets/characters/
+public/assets/characters/*
+!public/assets/characters/us_soldier.glb
+!public/assets/models/
+public/assets/models/*
+!public/assets/models/m4/

@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BREACHPOINT</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <!-- Loading -->
+    <section id="loading" class="screen">
+      <div class="brand">BREACH<span>POINT</span></div>
+      <div class="loadbar"><div id="loadbar-fill"></div></div>
+      <p id="loading-text">Loading assets…</p>
+    </section>
+
+    <!-- Main menu -->
+    <section id="menu" class="screen hidden">
+      <div class="menu-panel">
+        <div class="brand">BREACH<span>POINT</span></div>
+        <p class="tagline">Tactical close-quarters combat</p>
+        <nav class="menu-list">
+          <button data-action="play-waves" class="primary">
+            <b>Wave Survival</b><small>Hold the compound against endless escalating waves</small>
+          </button>
+          <button data-action="play-practice">
+            <b>Practice Range</b><small>Moving targets, infinite ammo, no return fire</small>
+          </button>
+          <button data-action="settings"><b>Settings</b><small>Graphics quality, mouse, audio</small></button>
+          <button data-action="controls"><b>Controls</b><small>Keyboard and mouse bindings</small></button>
+        </nav>
+        <p class="credits">Assets: Poly Haven (CC0) · "Classic M4" by jeandiz and "American Soldier Rigged" by matheofrelin3 (Sketchfab, CC BY 4.0) · animations from three.js examples</p>
+      </div>
+    </section>
+
+    <!-- Pause -->
+    <section id="pause" class="screen hidden dim">
+      <div class="menu-panel narrow">
+        <h1>PAUSED</h1>
+        <nav class="menu-list">
+          <button data-action="resume" class="primary"><b>Resume</b></button>
+          <button data-action="settings"><b>Settings</b></button>
+          <button data-action="controls"><b>Controls</b></button>
+          <button data-action="quit"><b>Quit to menu</b></button>
+        </nav>
+      </div>
+    </section>
+
+    <!-- Game over -->
+    <section id="gameover" class="screen hidden dim">
+      <div class="menu-panel narrow">
+        <h1 class="red">K.I.A.</h1>
+        <div class="stats">
+          <div><span>Wave reached</span><b id="go-wave">0</b></div>
+          <div><span>Kills</span><b id="go-kills">0</b></div>
+          <div><span>Score</span><b id="go-score">0</b></div>
+          <div><span>Best score</span><b id="go-best">0</b></div>
+        </div>
+        <nav class="menu-list">
+          <button data-action="play-again" class="primary"><b>Deploy again</b></button>
+          <button data-action="quit"><b>Main menu</b></button>
+        </nav>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section id="settings" class="screen hidden dim">
+      <div class="menu-panel">
+        <h1>SETTINGS</h1>
+        <div class="setting">
+          <label>Graphics quality</label>
+          <div class="segmented" id="quality">
+            <button data-q="low">Low</button>
+            <button data-q="medium">Medium</button>
+            <button data-q="high">High</button>
+            <button data-q="ultra">Ultra</button>
+          </div>
+          <p class="hint" id="quality-hint"></p>
+        </div>
+        <div class="setting">
+          <label>Mouse sensitivity <output id="sens-out"></output></label>
+          <input type="range" id="sens" min="0.2" max="3" step="0.05" />
+        </div>
+        <div class="setting">
+          <label>Field of view <output id="fov-out"></output></label>
+          <input type="range" id="fov" min="65" max="110" step="1" />
+        </div>
+        <div class="setting">
+          <label>Master volume <output id="vol-out"></output></label>
+          <input type="range" id="vol" min="0" max="1" step="0.05" />
+        </div>
+        <div class="setting row">
+          <label for="showfps">Show FPS counter</label>
+          <input type="checkbox" id="showfps" />
+        </div>
+        <nav class="menu-list">
+          <button data-action="back" class="primary"><b>Apply &amp; back</b></button>
+        </nav>
+      </div>
+    </section>
+
+    <!-- Controls -->
+    <section id="controls" class="screen hidden dim">
+      <div class="menu-panel narrow">
+        <h1>CONTROLS</h1>
+        <table class="keys">
+          <tr><td><kbd>W A S D</kbd></td><td>Move</td></tr>
+          <tr><td><kbd>Mouse</kbd></td><td>Look</td></tr>
+          <tr><td><kbd>LMB</kbd></td><td>Fire</td></tr>
+          <tr><td><kbd>RMB</kbd></td><td>Aim down sights (hold)</td></tr>
+          <tr><td><kbd>R</kbd></td><td>Reload</td></tr>
+          <tr><td><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>Q</kbd> <kbd>Wheel</kbd></td><td>M4 / Pistol / Sniper</td></tr>
+          <tr><td><kbd>Shift</kbd> (scoped)</td><td>Hold breath</td></tr>
+          <tr><td><kbd>Shift</kbd></td><td>Sprint</td></tr>
+          <tr><td><kbd>Ctrl</kbd> / <kbd>C</kbd></td><td>Crouch</td></tr>
+          <tr><td><kbd>Space</kbd></td><td>Jump</td></tr>
+          <tr><td><kbd>Esc</kbd></td><td>Pause</td></tr>
+        </table>
+        <nav class="menu-list">
+          <button data-action="back" class="primary"><b>Back</b></button>
+        </nav>
+      </div>
+    </section>
+
+    <!-- HUD -->
+    <div id="hud" class="hidden">
+      <div id="scope" class="hidden">
+        <div class="scope-glass"></div>
+        <svg class="reticle" viewBox="-500 -500 1000 1000" preserveAspectRatio="xMidYMid meet">
+          <g stroke="#0a0a0a" fill="#0a0a0a">
+            <!-- thick outer posts -->
+            <rect x="-500" y="-3.5" width="340" height="7" />
+            <rect x="160" y="-3.5" width="340" height="7" />
+            <rect x="-3.5" y="160" width="7" height="340" />
+            <!-- fine crosshair -->
+            <line x1="-160" y1="0" x2="160" y2="0" stroke-width="1.4" />
+            <line x1="0" y1="-500" x2="0" y2="160" stroke-width="1.4" />
+            <!-- mil dots -->
+            <g stroke="none">
+              <circle cx="-128" cy="0" r="3.2" /><circle cx="-96" cy="0" r="3.2" /><circle cx="-64" cy="0" r="3.2" /><circle cx="-32" cy="0" r="3.2" />
+              <circle cx="32" cy="0" r="3.2" /><circle cx="64" cy="0" r="3.2" /><circle cx="96" cy="0" r="3.2" /><circle cx="128" cy="0" r="3.2" />
+              <circle cx="0" cy="32" r="3.2" /><circle cx="0" cy="64" r="3.2" /><circle cx="0" cy="96" r="3.2" /><circle cx="0" cy="128" r="3.2" />
+              <circle cx="0" cy="-32" r="3.2" /><circle cx="0" cy="-64" r="3.2" /><circle cx="0" cy="-96" r="3.2" /><circle cx="0" cy="-128" r="3.2" />
+            </g>
+            <circle cx="0" cy="0" r="1.6" fill="#c0201a" stroke="none" />
+          </g>
+        </svg>
+        <div class="scope-breath"><span>HOLD SHIFT · STEADY</span><div><i id="breath-bar"></i></div></div>
+      </div>
+      <div id="crosshair"><i></i><i></i><i></i><i></i></div>
+      <div id="hitmarker"><i></i><i></i><i></i><i></i></div>
+      <div id="damage-vignette"></div>
+      <div id="damage-dir"><div></div></div>
+      <div id="fps" class="hidden"></div>
+
+      <div class="hud-top">
+        <div id="hud-title"></div>
+        <div id="hud-detail"></div>
+      </div>
+      <div class="hud-topright">
+        <div><span>SCORE</span><b id="hud-score">0</b></div>
+        <div><span>HOSTILES</span><b id="hud-alive">0</b></div>
+      </div>
+      <div id="killfeed"></div>
+
+      <div class="hud-bl">
+        <div class="vital">
+          <span class="icon">✚</span><b id="hud-health">100</b>
+          <div class="bar"><div id="hud-health-bar"></div></div>
+        </div>
+        <div class="vital armor"><span class="icon">⛨</span><b id="hud-armor">100</b></div>
+      </div>
+      <div class="hud-br">
+        <div id="hud-weapon"></div>
+        <div class="ammo"><b id="hud-ammo">0</b><span>/</span><em id="hud-reserve">0</em></div>
+        <div id="hud-reload" class="hidden">RELOADING</div>
+      </div>
+      <div id="banner"><h2></h2><p></p></div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
