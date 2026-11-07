@@ -23,6 +23,13 @@ export class Hud {
   private dirIndicator = $('damage-dir');
   private scope = $('scope');
   private breathBar = $('breath-bar');
+  private slots = Array.from(document.querySelectorAll<HTMLElement>('#hud-slots i'));
+  private magbar = $('hud-magbar');
+  private br = document.querySelector<HTMLElement>('.hud-br')!;
+  private prompt = $('ammo-prompt');
+  private suppressEl = $('suppress-vignette');
+  private grenadeEl = $('grenade-warn');
+  private suppressT = 0;
   private scoped = false;
   private hitT = 0;
   private damageT = 0;
@@ -39,9 +46,28 @@ export class Hud {
   }
 
   update(dt: number, s: {
-    health: number; armor: number; mag: number; reserve: number | string; weapon: string;
+    health: number; armor: number; mag: number; magSize: number; reserve: number | string; weapon: string; slot: number;
     title: string; detail: string; score: number; alive: number; spread: number; aiming: boolean; reloading: boolean;
+    outOfAmmo: boolean;
   }): void {
+    this.slots.forEach((el, i) => el.classList.toggle('on', i === s.slot));
+    this.magbar.style.setProperty('--fill', `${(s.mag / s.magSize) * 100}%`);
+    const reserveLeft = typeof s.reserve === 'string' || s.reserve > 0;
+    const low = s.mag > 0 && s.mag <= Math.ceil(s.magSize * 0.25);
+    const dry = s.mag === 0;
+    this.br.classList.toggle('low', low && !s.reloading);
+    this.br.classList.toggle('dry', dry && !s.reloading);
+    let msg = '';
+    if (!s.reloading) {
+      if (s.outOfAmmo || (dry && !reserveLeft)) msg = 'NO AMMO · SWITCH WEAPON';
+      else if (dry) msg = 'RELOAD [R]';
+      else if (low && reserveLeft) msg = 'LOW AMMO';
+    }
+    this.prompt.textContent = msg;
+    this.prompt.classList.toggle('hidden', !msg);
+    this.prompt.classList.toggle('dry', dry);
+    this.suppressT = Math.max(0, this.suppressT - dt * 0.8);
+    this.suppressEl.style.opacity = String(Math.min(1, this.suppressT));
     this.health.textContent = String(Math.ceil(s.health));
     this.healthBar.style.width = `${s.health}%`;
     this.healthBar.classList.toggle('low', s.health < 30);
@@ -84,6 +110,40 @@ export class Hud {
       this.scope.classList.toggle('hidden', !on);
     }
     if (on) this.breathBar.style.width = `${Math.round(breath * 100)}%`;
+  }
+
+  /** A bullet snapped past: darken the edges briefly. */
+  suppress(amount: number): void {
+    this.suppressT = Math.min(1.2, this.suppressT + amount);
+  }
+
+  /** Grenade indicators: on screen where visible, otherwise pinned to the edge toward them. */
+  grenades(list: { x: number; y: number; z: number }[], camera: { position: { distanceTo(v: unknown): number } } & import('three').Camera, playerPos: import('three').Vector3): void {
+    const near = list.filter((g) => playerPos.distanceTo(g as import('three').Vector3) < 10);
+    while (this.grenadeEl.children.length < near.length) {
+      const d = document.createElement('div');
+      d.className = 'gw';
+      d.textContent = '!';
+      this.grenadeEl.appendChild(d);
+    }
+    while (this.grenadeEl.children.length > near.length) this.grenadeEl.lastChild!.remove();
+    const w = window.innerWidth, h = window.innerHeight;
+    near.forEach((g, i) => {
+      const v = (g as import('three').Vector3).clone().project(camera);
+      let x = v.x, y = v.y;
+      if (v.z > 1) {
+        x = -x;
+        y = -y;
+      }
+      const m = Math.max(Math.abs(x), Math.abs(y));
+      if (m > 0.9 || v.z > 1) {
+        x = (x / m) * 0.9;
+        y = (y / m) * 0.9;
+      }
+      const el = this.grenadeEl.children[i] as HTMLElement;
+      el.style.left = `${((x + 1) / 2) * w}px`;
+      el.style.top = `${((1 - y) / 2) * h}px`;
+    });
   }
 
   hit(headshot: boolean, kill: boolean): void {

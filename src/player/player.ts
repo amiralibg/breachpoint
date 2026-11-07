@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { Input } from '../core/input';
+import { Btn, type PlayerCommand } from '../net/protocol';
 
 const STAND_H = 1.8;
 const CROUCH_H = 1.25;
@@ -15,8 +15,15 @@ const ACCEL_GROUND = 60;
 const ACCEL_AIR = 12;
 const FRICTION = 10;
 
+/**
+ * Player movement. `simulate` is deterministic given the command and the colliders, so a server
+ * can run the exact same code and a client can replay unacknowledged commands (prediction).
+ * `render` only places the camera (interpolated between ticks) and never feeds back into the sim.
+ */
 export class Player {
+  readonly id = 0;
   readonly position = new THREE.Vector3();
+  private prevPosition = new THREE.Vector3();
   readonly velocity = new THREE.Vector3();
   yaw = 0;
   pitch = 0;
@@ -24,6 +31,7 @@ export class Player {
   punchPitch = 0;
   punchYaw = 0;
   height = STAND_H;
+  private prevHeight = STAND_H;
   onGround = false;
   crouching = false;
   sprinting = false;
@@ -32,14 +40,24 @@ export class Player {
   alive = true;
   /** 0..1 how fast the player is moving relative to walk speed. */
   moveFactor = 0;
+  /** Set for one tick when landing; 0..1 strength. */
+  landed = 0;
+  private fallSpeed = 0;
   private stepTimer = 0;
   onFootstep: (() => void) | null = null;
   private box = new THREE.Box3();
+  private bobT = 0;
+  private landDip = 0;
+  private landVel = 0;
+  private deathRoll = 0;
+  /** Extra view rotation that isn't part of the aim (scope sway, camera shake). */
+  readonly viewOffset = new THREE.Euler();
 
   constructor(private camera: THREE.PerspectiveCamera) {}
 
   spawn(p: THREE.Vector3, yaw: number): void {
     this.position.copy(p);
+    this.prevPosition.copy(p);
     this.velocity.set(0, 0, 0);
     this.yaw = yaw;
     this.pitch = 0;
@@ -47,11 +65,24 @@ export class Player {
     this.health = 100;
     this.armor = 100;
     this.alive = true;
-    this.height = STAND_H;
+    this.height = this.prevHeight = STAND_H;
+    this.crouching = false;
+    this.deathRoll = 0;
   }
 
+  /** Eye position at the latest tick (what the simulation uses). */
   get eye(): THREE.Vector3 {
-    return this.camera.position;
+    return new THREE.Vector3(this.position.x, this.position.y + this.height - EYE_OFFSET, this.position.z);
+  }
+
+  get eyeHeight(): number {
+    return this.height - EYE_OFFSET;
+  }
+
+  /** Mouse look (client side, every frame). */
+  look(dx: number, dy: number, sens: number): void {
+    this.yaw -= dx * sens;
+    this.pitch = THREE.MathUtils.clamp(this.pitch - dy * sens, -1.5, 1.5);
   }
 
   /** Apply damage, armor absorbs part of it. Returns true if this killed the player. */
@@ -68,36 +99,35 @@ export class Player {
     return false;
   }
 
-  update(dt: number, input: Input, colliders: THREE.Box3[], sensitivity: number, aiming: boolean, sensScale = 1): void {
-    // --- Look
-    const sens = 0.0022 * sensitivity * sensScale;
-    this.yaw -= input.mouseDX * sens;
-    this.pitch -= input.mouseDY * sens;
-    this.pitch = THREE.MathUtils.clamp(this.pitch, -1.5, 1.5);
+  simulate(cmd: PlayerCommand, dt: number, colliders: THREE.Box3[], aiming: boolean): void {
+    this.prevPosition.copy(this.position);
+    this.prevHeight = this.height;
+    this.yaw = cmd.yaw;
+    this.pitch = cmd.pitch;
+    this.landed = 0;
 
     // Recoil recovery
     const rec = Math.min(1, dt * 7);
     this.punchPitch -= this.punchPitch * rec;
     this.punchYaw -= this.punchYaw * rec;
-
     if (!this.alive) {
-      this.updateCamera(dt);
+      this.height = THREE.MathUtils.damp(this.height, 0.45, 4, dt);
+      this.deathRoll = THREE.MathUtils.damp(this.deathRoll, 0.6, 3, dt);
       return;
     }
+    const held = (b: number): boolean => (cmd.buttons & b) !== 0;
 
     // --- Crouch (smoothly change height, refuse to stand under a ceiling)
-    const wantCrouch = input.down('ControlLeft') || input.down('KeyC');
-    if (wantCrouch) this.crouching = true;
+    if (held(Btn.Crouch)) this.crouching = true;
     else if (this.crouching && this.canStand(colliders)) this.crouching = false;
     const targetH = this.crouching ? CROUCH_H : STAND_H;
     this.height += (targetH - this.height) * Math.min(1, dt * 12);
 
     // --- Wish direction
-    const f = (input.down('KeyW') ? 1 : 0) - (input.down('KeyS') ? 1 : 0);
-    const s = (input.down('KeyD') ? 1 : 0) - (input.down('KeyA') ? 1 : 0);
-    const wish = new THREE.Vector3(s, 0, -f);
-    if (wish.lengthSq() > 0) wish.normalize().applyAxisAngle(THREE.Object3D.DEFAULT_UP, this.yaw);
-    this.sprinting = input.down('ShiftLeft') && f > 0 && !this.crouching && !aiming;
+    const wish = new THREE.Vector3(cmd.moveX, 0, -cmd.moveZ);
+    if (wish.lengthSq() > 1) wish.normalize();
+    if (wish.lengthSq() > 0) wish.applyAxisAngle(THREE.Object3D.DEFAULT_UP, this.yaw);
+    this.sprinting = held(Btn.Sprint) && cmd.moveZ > 0 && !this.crouching && !aiming;
     let maxSpeed = this.crouching ? CROUCH_SPEED : this.sprinting ? SPRINT : WALK;
     if (aiming) maxSpeed *= 0.6;
 
@@ -111,20 +141,22 @@ export class Player {
       }
     }
     const cur = hv.dot(wish);
-    const add = maxSpeed - cur;
+    const add = maxSpeed * Math.min(1, wish.length()) - cur;
     if (add > 0 && wish.lengthSq() > 0) {
       const accel = (this.onGround ? ACCEL_GROUND : ACCEL_AIR) * dt * maxSpeed;
-      hv.addScaledVector(wish, Math.min(add, accel));
+      hv.addScaledVector(wish.clone().normalize(), Math.min(add, accel));
     }
     this.velocity.x = hv.x;
     this.velocity.z = hv.z;
 
     // --- Jump & gravity
-    if (this.onGround && input.hit('Space')) {
+    if (this.onGround && (cmd.pressed & Btn.Jump)) {
       this.velocity.y = JUMP_V;
       this.onGround = false;
     }
     this.velocity.y -= GRAVITY * dt;
+    const wasGround = this.onGround;
+    this.fallSpeed = Math.max(this.fallSpeed, -this.velocity.y);
 
     // --- Move with collision, one axis at a time
     this.moveAxis('x', this.velocity.x * dt, colliders);
@@ -136,6 +168,14 @@ export class Player {
       this.velocity.y = 0;
       this.onGround = true;
     }
+    if (this.onGround && !wasGround) {
+      this.landed = THREE.MathUtils.clamp((this.fallSpeed - 2) / 8, 0, 1);
+      if (this.landed > 0) {
+        this.landVel -= this.landed * 1.6;
+        this.onFootstep?.();
+      }
+    }
+    if (this.onGround) this.fallSpeed = 0;
 
     // --- Footsteps
     const hs = Math.hypot(this.velocity.x, this.velocity.z);
@@ -147,18 +187,25 @@ export class Player {
         this.onFootstep?.();
       }
     }
-
-    this.updateCamera(dt);
   }
 
-  private bobT = 0;
-  private updateCamera(dt: number): void {
+  /** Place the camera between the last two ticks. */
+  render(alpha: number, dt: number): void {
     const hs = Math.hypot(this.velocity.x, this.velocity.z);
     if (this.onGround && hs > 0.5) this.bobT += dt * hs * 1.6;
-    const bob = this.onGround ? Math.sin(this.bobT * 2) * 0.025 * Math.min(1, hs / WALK) : 0;
-    const eyeY = this.alive ? this.height - EYE_OFFSET : 0.35;
-    this.camera.position.set(this.position.x, this.position.y + eyeY + bob, this.position.z);
-    this.camera.rotation.set(this.pitch + this.punchPitch, this.yaw + this.punchYaw, this.alive ? 0 : 0.6, 'YXZ');
+    const bob = this.onGround && this.alive ? Math.sin(this.bobT * 2) * 0.025 * Math.min(1, hs / WALK) : 0;
+    // Landing: a damped spring dips the view
+    this.landVel += (-this.landDip * 220 - this.landVel * 18) * dt;
+    this.landDip += this.landVel * dt;
+    const h = THREE.MathUtils.lerp(this.prevHeight, this.height, alpha);
+    const p = this.prevPosition.clone().lerp(this.position, alpha);
+    this.camera.position.set(p.x, p.y + h - EYE_OFFSET + bob + this.landDip * 0.08, p.z);
+    this.camera.rotation.set(
+      this.pitch + this.punchPitch + this.viewOffset.x + this.landDip * 0.05,
+      this.yaw + this.punchYaw + this.viewOffset.y,
+      this.deathRoll + this.viewOffset.z,
+      'YXZ',
+    );
   }
 
   private makeBox(pos: THREE.Vector3, h: number): THREE.Box3 {

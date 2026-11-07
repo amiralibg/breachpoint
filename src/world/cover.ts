@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { NavGrid } from './nav';
+import type { NavSystem } from './navmesh';
 import { lineOfSight } from './physics';
 
 export interface CoverPoint {
@@ -19,7 +19,7 @@ const STAND_EYE = 1.6;
 export class CoverMap {
   readonly points: CoverPoint[] = [];
 
-  constructor(colliders: THREE.Box3[], nav: NavGrid, private colliderList = colliders) {
+  constructor(colliders: THREE.Box3[], nav: NavSystem, private colliderList = colliders) {
     for (const b of colliders) {
       const h = b.max.y - Math.max(0, b.min.y);
       if (b.min.y > 0.3 || h < 1.0) continue;
@@ -36,8 +36,7 @@ export class CoverMap {
         for (let i = 0; i < count; i++) {
           const t = (i + 0.5) / count;
           const p = o.clone().addScaledVector(dir, len * t).addScaledVector(n, 0.75);
-          const [cx, cz] = nav.cellOf(p);
-          if (nav.isBlocked(cx, cz)) continue;
+          if (!nav.walkable(p, 0.35)) continue;
           if (Math.abs(p.x) > 39 || Math.abs(p.z) > 39) continue;
           this.points.push({ pos: p, normal: n.clone(), low, claimedBy: null });
         }
@@ -72,16 +71,16 @@ export class CoverMap {
   }
 
   /**
-   * Best free cover for a bot: protects from the threat, ideally lets it peek, at a preferred
-   * distance from the threat, close to the bot, and optionally off to one side (flanking).
+   * Free cover points for a bot ranked best first: protects from the threat, ideally lets it
+   * peek, at a preferred distance from the threat, close to the bot, optionally off to one side
+   * (flanking), and spread out from squad mates.
    */
-  find(opts: {
+  rank(opts: {
     owner: object; from: THREE.Vector3; threat: THREE.Vector3;
     minDist: number; maxDist: number; maxTravel: number;
-    flankDir?: THREE.Vector3; needPeek?: boolean;
-  }): CoverPoint | null {
-    let best: CoverPoint | null = null;
-    let bestScore = Infinity;
+    flankDir?: THREE.Vector3; needPeek?: boolean; avoid?: THREE.Vector3[];
+  }, limit = 4): CoverPoint[] {
+    const scored: { c: CoverPoint; s: number }[] = [];
     for (const c of this.points) {
       if (c.claimedBy && c.claimedBy !== opts.owner) continue;
       const dThreat = c.pos.distanceTo(opts.threat);
@@ -94,18 +93,21 @@ export class CoverMap {
       let score = travel + (peek ? 0 : 6) + Math.abs(dThreat - (opts.minDist + opts.maxDist) / 2) * 0.3;
       if (opts.flankDir) {
         const dir = new THREE.Vector3().subVectors(c.pos, opts.threat).setY(0).normalize();
-        score -= dir.dot(opts.flankDir) * 10;
+        score -= dir.dot(opts.flankDir) * 12;
       }
-      // Avoid bunching up with other claimed points
+      // Avoid bunching up with other claimed points (one grenade shouldn't get two bots)
       for (const o of this.points) {
-        if (o !== c && o.claimedBy && o.claimedBy !== opts.owner && o.pos.distanceToSquared(c.pos) < 9) score += 4;
+        if (o !== c && o.claimedBy && o.claimedBy !== opts.owner && o.pos.distanceToSquared(c.pos) < 16) score += 5;
       }
+      for (const a of opts.avoid ?? []) if (a.distanceToSquared(c.pos) < 36) score += 8;
       score += Math.random() * 1.5;
-      if (score < bestScore) {
-        bestScore = score;
-        best = c;
-      }
+      scored.push({ c, s: score });
     }
-    return best;
+    scored.sort((a, b) => a.s - b.s);
+    return scored.slice(0, limit).map((x) => x.c);
+  }
+
+  find(opts: Parameters<CoverMap['rank']>[0]): CoverPoint | null {
+    return this.rank(opts, 1)[0] ?? null;
   }
 }

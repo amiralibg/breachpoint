@@ -237,6 +237,38 @@ export class Effects {
     if (this.pools.length > 16) this.scene.remove(this.pools.shift()!.mesh);
   }
 
+  /** Grenade blast: fireball, smoke column, debris sparks, a scorch mark and a light flash. */
+  explosion(point: THREE.Vector3): void {
+    for (let i = 0; i < 10; i++) {
+      const v = new THREE.Vector3((Math.random() - 0.5) * 6, 1 + Math.random() * 4, (Math.random() - 0.5) * 6);
+      this.spawn(point.clone().add(new THREE.Vector3(0, 0.3, 0)), v, 0xffa040, 0.6 + Math.random() * 0.6, 0.25 + Math.random() * 0.15, 3, 0, true);
+    }
+    for (let i = 0; i < 14; i++) {
+      const v = new THREE.Vector3((Math.random() - 0.5) * 5, 1.5 + Math.random() * 3.5, (Math.random() - 0.5) * 5);
+      this.spawn(point.clone().add(new THREE.Vector3(0, 0.4, 0)), v, i < 6 ? 0x3a352e : 0x7d7366, 0.8 + Math.random() * 0.8, 2.2 + Math.random() * 1.8, 0.9, -0.4);
+    }
+    for (let i = 0; i < 24; i++) {
+      const v = new THREE.Vector3((Math.random() - 0.5) * 18, 3 + Math.random() * 9, (Math.random() - 0.5) * 18);
+      this.spawn(point.clone().add(new THREE.Vector3(0, 0.2, 0)), v, 0xffc070, 0.05, 0.5 + Math.random() * 0.4, 0, 12, true);
+    }
+    const scorch = new THREE.Mesh(this.unitPlane, this.poolMat.clone());
+    (scorch.material as THREE.MeshStandardMaterial).color.set(0x111111);
+    (scorch.material as THREE.MeshStandardMaterial).roughness = 1;
+    scorch.userData.noAO = true;
+    scorch.rotation.x = -Math.PI / 2;
+    scorch.rotation.z = Math.random() * Math.PI * 2;
+    scorch.position.set(point.x, 0.011, point.z);
+    scorch.scale.setScalar(2.4);
+    this.scene.add(scorch);
+    this.splats.push(scorch);
+    const light = new THREE.PointLight(0xffa050, 120, 18, 2);
+    light.position.copy(point).setY(point.y + 0.8);
+    this.scene.add(light);
+    this.lights.push({ light, life: 0.35, max: 0.35, peak: 120 });
+  }
+
+  private lights: { light: THREE.PointLight; life: number; max: number; peak: number }[] = [];
+
   tracer(from: THREE.Vector3, to: THREE.Vector3): void {
     const g = new THREE.BufferGeometry().setFromPoints([from, to]);
     const line = new THREE.Line(g, this.tracerMat.clone());
@@ -245,6 +277,15 @@ export class Effects {
   }
 
   update(dt: number): void {
+    for (let i = this.lights.length - 1; i >= 0; i--) {
+      const l = this.lights[i];
+      l.life -= dt;
+      l.light.intensity = Math.max(0, l.life / l.max) ** 2 * l.peak;
+      if (l.life <= 0) {
+        this.scene.remove(l.light);
+        this.lights.splice(i, 1);
+      }
+    }
     for (const p of this.pools) {
       p.age += dt;
       const k = 1 - Math.exp(-p.age * 0.45);
@@ -288,5 +329,7 @@ export class Effects {
     this.particles = [];
     for (const t of this.tracers) this.scene.remove(t.line);
     this.tracers = [];
+    for (const l of this.lights) this.scene.remove(l.light);
+    this.lights = [];
   }
 }

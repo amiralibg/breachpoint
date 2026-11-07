@@ -164,3 +164,29 @@ kbd { font-family: var(--font); background: #22252a; border: 1px solid #3a3d42; 
 .scope-breath { position: absolute; left: 50%; bottom: 7vh; transform: translateX(-50%); text-align: center; font-size: 11px; letter-spacing: .25em; color: #8b8882; }
 .scope-breath div { width: 160px; height: 3px; background: rgba(255,255,255,.12); margin: 6px auto 0; }
 .scope-breath i { display: block; height: 100%; width: 100%; background: var(--accent); }
+
+/* --- Ammo state, slots, suppression, grenades, AI debug */
+#hud-slots { display: flex; gap: 6px; justify-content: flex-end; margin-bottom: 6px; }
+#hud-slots i { font-style: normal; font-size: 11px; width: 20px; height: 20px; display: grid; place-items: center;
+  border: 1px solid rgba(255,255,255,.25); color: rgba(255,255,255,.45); border-radius: 3px; }
+#hud-slots i.on { border-color: var(--accent); color: var(--accent); background: rgba(255,255,255,.06); }
+#hud-magbar { height: 3px; margin-top: 6px; background: rgba(255,255,255,.12); border-radius: 2px; overflow: hidden; }
+#hud-magbar::after { content: ''; display: block; height: 100%; width: var(--fill, 100%); background: currentColor; opacity: .8;
+  transition: width .08s linear; }
+.hud-br.low { color: #ffb347; }
+.hud-br.low .ammo b { color: #ffb347; }
+.hud-br.dry { color: var(--red); }
+#ammo-prompt { position: absolute; left: 50%; top: calc(50% + 70px); transform: translateX(-50%); font-size: 13px;
+  letter-spacing: .25em; color: #ffb347; text-shadow: 0 1px 3px rgba(0,0,0,.8); white-space: nowrap; }
+#ammo-prompt.dry { color: var(--red); animation: blink .5s infinite alternate; }
+#suppress-vignette { position: absolute; inset: 0; opacity: 0; pointer-events: none;
+  background: radial-gradient(ellipse at center, transparent 45%, rgba(10,10,10,.55) 100%);
+  backdrop-filter: blur(0px); }
+#grenade-warn { position: absolute; inset: 0; pointer-events: none; }
+#grenade-warn .gw { position: absolute; width: 34px; height: 34px; margin: -17px; border-radius: 50%;
+  border: 2px solid var(--red); display: grid; place-items: center; color: var(--red); font-size: 15px; font-weight: 700;
+  background: rgba(0,0,0,.35); animation: blink .25s infinite alternate; }
+#ai-debug { position: fixed; inset: 0; pointer-events: none; z-index: 30; font: 11px/1.25 ui-monospace, monospace; display: none; }
+#ai-debug > div { position: absolute; transform: translate(-50%, -100%); background: rgba(0,0,0,.6); color: #cfe; padding: 2px 5px;
+  border-radius: 3px; white-space: nowrap; text-align: center; }
+#ai-debug > .sq { left: 12px !important; top: auto !important; bottom: 12px; transform: none; }

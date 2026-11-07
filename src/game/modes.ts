@@ -74,7 +74,7 @@ export class WaveMode implements GameMode {
     if (this.toSpawn > 0 && this.spawnT <= 0 && game.enemies.alive < this.maxConcurrent()) {
       const at = game.pickEnemySpawn();
       if (at) {
-        game.enemies.spawn(at, this.stats());
+        game.enemies.spawn(at, this.stats(), game.player.position);
         this.toSpawn--;
         this.spawnT = Math.max(0.5, 2 - this.wave * 0.1);
       }

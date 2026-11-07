@@ -79,3 +79,32 @@ export function rayCapsule(
   return best;
 }
 const _c = new THREE.Vector3();
+
+/** Ray vs capsule around segment a-b with radius r (Inigo Quilez's formulation). Distance or -1. */
+export function raySegment(o: THREE.Vector3, d: THREE.Vector3, a: THREE.Vector3, b: THREE.Vector3, r: number): number {
+  const ba = _ba.subVectors(b, a);
+  const oa = _oa.subVectors(o, a);
+  const baba = ba.dot(ba);
+  const bard = ba.dot(d);
+  const baoa = ba.dot(oa);
+  const rdoa = d.dot(oa);
+  const oaoa = oa.dot(oa);
+  const A = baba - bard * bard;
+  let B = baba * rdoa - baoa * bard;
+  let C = baba * oaoa - baoa * baoa - r * r * baba;
+  let h = B * B - A * C;
+  if (h < 0) return -1;
+  const t = A > 1e-9 ? (-B - Math.sqrt(h)) / A : 0;
+  const y = baoa + t * bard;
+  if (A > 1e-9 && y > 0 && y < baba) return t >= 0 ? t : -1;
+  const oc = y <= 0 ? oa : _oc.subVectors(o, b);
+  B = d.dot(oc);
+  C = oc.dot(oc) - r * r;
+  h = B * B - C;
+  if (h <= 0) return -1;
+  const tc = -B - Math.sqrt(h);
+  return tc >= 0 ? tc : -1;
+}
+const _ba = new THREE.Vector3();
+const _oa = new THREE.Vector3();
+const _oc = new THREE.Vector3();

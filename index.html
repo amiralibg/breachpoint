@@ -110,13 +110,15 @@
           <tr><td><kbd>Mouse</kbd></td><td>Look</td></tr>
           <tr><td><kbd>LMB</kbd></td><td>Fire</td></tr>
           <tr><td><kbd>RMB</kbd></td><td>Aim down sights (hold)</td></tr>
-          <tr><td><kbd>R</kbd></td><td>Reload</td></tr>
+          <tr><td><kbd>R</kbd></td><td>Reload (tactical keeps the mag, empty racks the bolt)</td></tr>
+          <tr><td><kbd>F</kbd></td><td>Inspect weapon</td></tr>
           <tr><td><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>Q</kbd> <kbd>Wheel</kbd></td><td>M4 / Pistol / Sniper</td></tr>
           <tr><td><kbd>Shift</kbd> (scoped)</td><td>Hold breath</td></tr>
           <tr><td><kbd>Shift</kbd></td><td>Sprint</td></tr>
           <tr><td><kbd>Ctrl</kbd> / <kbd>C</kbd></td><td>Crouch</td></tr>
           <tr><td><kbd>Space</kbd></td><td>Jump</td></tr>
           <tr><td><kbd>Esc</kbd></td><td>Pause</td></tr>
+          <tr><td><kbd>F3</kbd></td><td>AI debug overlay</td></tr>
         </table>
         <nav class="menu-list">
           <button data-action="back" class="primary"><b>Back</b></button>
@@ -152,6 +154,9 @@
       <div id="crosshair"><i></i><i></i><i></i><i></i></div>
       <div id="hitmarker"><i></i><i></i><i></i><i></i></div>
       <div id="damage-vignette"></div>
+      <div id="suppress-vignette"></div>
+      <div id="ammo-prompt" class="hidden"></div>
+      <div id="grenade-warn"></div>
       <div id="damage-dir"><div></div></div>
       <div id="fps" class="hidden"></div>
 
@@ -173,8 +178,10 @@
         <div class="vital armor"><span class="icon">⛨</span><b id="hud-armor">100</b></div>
       </div>
       <div class="hud-br">
+        <div id="hud-slots"><i>1</i><i>2</i><i>3</i></div>
         <div id="hud-weapon"></div>
         <div class="ammo"><b id="hud-ammo">0</b><span>/</span><em id="hud-reserve">0</em></div>
+        <div id="hud-magbar"></div>
         <div id="hud-reload" class="hidden">RELOADING</div>
       </div>
       <div id="banner"><h2></h2><p></p></div>

@@ -8,9 +8,13 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "assets": "python3 scripts/fetch-assets.py"
+    "assets": "python3 scripts/fetch-assets.py",
+    "sounds": "python3 scripts/make_sounds.py"
   },
   "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.21.0",
+    "@recast-navigation/three": "^0.44.0",
+    "recast-navigation": "^0.44.0",
     "three": "^0.187.0"
   },
   "devDependencies": {

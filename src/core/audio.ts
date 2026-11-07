@@ -1,5 +1,26 @@
 import * as THREE from 'three';
 
+const SAMPLE_NAMES = [
+  'm4_shot', 'pistol_shot', 'sniper_shot', 'mag_out', 'mag_in', 'mag_drop', 'charge_back', 'charge_fwd',
+  'bolt', 'slide', 'round_in', 'dry_fire', 'holster', 'whiz', 'impact', 'flesh', 'footstep', 'hitmarker',
+] as const;
+export type SampleName = (typeof SAMPLE_NAMES)[number];
+
+let rawSamples: Promise<Map<string, ArrayBuffer>> | null = null;
+
+/** Fetch the sound files (no AudioContext needed yet, so this can run during loading). */
+export function preloadSamples(): Promise<Map<string, ArrayBuffer>> {
+  rawSamples ??= Promise.all(SAMPLE_NAMES.map(async (n): Promise<[string, ArrayBuffer] | null> => {
+    try {
+      const r = await fetch(`${import.meta.env.BASE_URL}assets/audio/${n}.wav`);
+      return r.ok ? [n, await r.arrayBuffer()] : null;
+    } catch {
+      return null;
+    }
+  })).then((list) => new Map(list.filter((x): x is [string, ArrayBuffer] => x !== null)));
+  return rawSamples;
+}
+
 /**
  * Procedural sound effects using the Web Audio API (no audio files needed).
  * Positional sounds are panned and attenuated relative to the listener.
@@ -9,6 +30,7 @@ export class Audio {
   private master: GainNode;
   private noise: AudioBuffer;
   private listenerPos = new THREE.Vector3();
+  private samples = new Map<string, AudioBuffer>();
 
   constructor(volume: number) {
     this.ctx = new AudioContext();
@@ -23,6 +45,44 @@ export class Audio {
     this.noise = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
     const d = this.noise.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+
+    void preloadSamples().then((raw) => {
+      for (const [n, buf] of raw) {
+        this.ctx.decodeAudioData(buf.slice(0)).then((b) => this.samples.set(n, b)).catch(() => {});
+      }
+    });
+  }
+
+  has(name: SampleName): boolean {
+    return this.samples.has(name);
+  }
+
+  /**
+   * Play a recorded sound. Positional sounds are panned, and far ones lose their highs
+   * (distant gunfire is a dull thump, not a crack).
+   */
+  play(name: SampleName, opts: { pos?: THREE.Vector3; gain?: number; rate?: number; delay?: number } = {}): boolean {
+    const buf = this.samples.get(name);
+    if (!buf) return false;
+    const t = this.ctx.currentTime + (opts.delay ?? 0);
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    src.playbackRate.value = (opts.rate ?? 1) * (0.96 + Math.random() * 0.08);
+    const g = this.ctx.createGain();
+    g.gain.value = opts.gain ?? 1;
+    let node: AudioNode = src.connect(g);
+    if (opts.pos) {
+      const d = opts.pos.distanceTo(this.listenerPos);
+      if (d > 12) {
+        const lp = this.ctx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.value = THREE.MathUtils.clamp(14000 / (d / 12) ** 1.4, 500, 14000);
+        node = node.connect(lp);
+      }
+    }
+    node.connect(this.out(opts.pos));
+    src.start(t);
+    return true;
   }
 
   resume(): void {
@@ -96,8 +156,13 @@ export class Audio {
   }
 
   /** Gunshot. `power` ~1 for pistol, ~1.6 for rifle. */
-  gunshot(power: number, pos?: THREE.Vector3): void {
+  gunshot(power: number, pos?: THREE.Vector3, sample?: SampleName): void {
     const t = this.ctx.currentTime;
+    if (sample && this.play(sample, { pos, gain: pos ? 1.1 : 0.9 })) {
+      // Slap-back echo off the compound walls on top of the recording
+      this.noiseBurst(this.out(pos), t + 0.11, 0.6 * power, 0.1, 900, 80);
+      return;
+    }
     const dest = this.out(pos);
     this.noiseBurst(dest, t, 0.09 * power, 1.2, 9000, 1200, 1.2); // crack
     this.noiseBurst(dest, t, 0.45 * power, 0.7, 2500, 120); // body / room tail
@@ -159,6 +224,7 @@ export class Audio {
   }
 
   bulletWhiz(pos: THREE.Vector3): void {
+    if (this.play('whiz', { pos, gain: 0.8, rate: 0.9 + Math.random() * 0.3 })) return;
     const t = this.ctx.currentTime;
     const dest = this.out(pos);
     const src = this.ctx.createBufferSource();
@@ -174,6 +240,34 @@ export class Audio {
     g.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
     src.connect(bp).connect(g).connect(dest);
     src.start(t, Math.random(), 0.25);
+  }
+
+  /** Grenade blast: low boom, crack and a long rumble. */
+  explosion(pos: THREE.Vector3): void {
+    const t = this.ctx.currentTime;
+    const dest = this.out(pos);
+    this.noiseBurst(dest, t, 0.12, 1.6, 7000, 900, 1);
+    this.noiseBurst(dest, t, 1.6, 1.4, 1800, 40);
+    this.thump(dest, t, 70, 0.9, 1.6);
+    this.noiseBurst(dest, t + 0.2, 1.8, 0.25, 500, 40);
+  }
+
+  /** Metallic tink of a grenade or magazine hitting the ground. */
+  clink(pos: THREE.Vector3, pitch = 1): void {
+    const t = this.ctx.currentTime;
+    const dest = this.out(pos);
+    for (const f of [2300, 3450]) {
+      const o = this.ctx.createOscillator();
+      o.type = 'triangle';
+      o.frequency.value = f * pitch * (0.95 + Math.random() * 0.1);
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0.12, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+      o.connect(g).connect(dest);
+      o.start(t);
+      o.stop(t + 0.13);
+    }
+    this.noiseBurst(dest, t, 0.04, 0.2, 5000, 1500);
   }
 
   waveHorn(): void {
