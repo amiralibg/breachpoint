@@ -14,6 +14,13 @@ export interface WorldMap {
 }
 
 const HALF = 40; // the playable area is 80 x 80 m
+const ROAD_HALF_W = 4.5;
+
+/** Ground material under a point (for footsteps): the asphalt road and anything raised are hard. */
+export function surfaceAt(p: { x: number; y: number; z: number }): 'dirt' | 'hard' {
+  if (p.y > 0.2) return 'hard';
+  return Math.abs(p.x) < ROAD_HALF_W && Math.abs(p.z) < HALF ? 'hard' : 'dirt';
+}
 const TILE = 3; // meters per texture repeat on walls/ground
 
 /** Box with UVs scaled to world size, so textures keep a constant texel density. */
@@ -104,7 +111,7 @@ export async function buildMap(scene: THREE.Scene, q: QualityPreset): Promise<Wo
   ground.receiveShadow = true;
   root.add(ground);
 
-  const roadGeo = new THREE.PlaneGeometry(9, HALF * 2);
+  const roadGeo = new THREE.PlaneGeometry(ROAD_HALF_W * 2, HALF * 2);
   roadGeo.attributes.uv.array.forEach((_, i, arr) => {
     (arr as Float32Array)[i] *= i % 2 === 0 ? 9 / 4 : (HALF * 2) / 4;
   });

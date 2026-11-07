@@ -17,6 +17,16 @@ export interface HandAnchor {
   curl: number;
 }
 
+/** Capsule from a to b (holder space), optionally riding on a movable part. */
+export interface GunCollider {
+  a: V3;
+  b: V3;
+  r: number;
+  part?: string;
+  /** Only this hand collides with it (e.g. the pistol support hand wraps the shooting hand). */
+  hand?: 'l' | 'r';
+}
+
 export interface WeaponDef {
   id: string;
   name: string;
@@ -38,6 +48,8 @@ export interface WeaponDef {
   /** Parts that stay at their fire offset when the magazine runs dry (slide/bolt lock). */
   lockOnEmpty?: string[];
   hands: Record<string, HandAnchor>;
+  /** Simple capsule shapes of the gun (holder space) that hands rest on but never sink into. */
+  colliders: GunCollider[];
   /** Rest anchors for each hand. */
   restLeft: string;
   restRight: string;
@@ -155,12 +167,23 @@ const M4: WeaponDef = {
   fireParts: { bolt: [0, 0, 0.05] },
   lockOnEmpty: ['bolt'],
   hands: {
-    grip: { pos: [0.014, -0.075, 0.118], fwd: [-0.45, -0.1, -0.89], back: [0.95, 0.3, 0], curl: 1.1 },
-    guard: { pos: [0.0, -0.06, -0.2], fwd: [0.45, 0.2, -0.87], back: [-0.35, -0.94, 0], curl: 1.25 },
-    mag: { part: 'mag', pos: [-0.018, -0.17, -0.035], fwd: [0.1, 1, 0], back: [-0.95, 0, 0.3], curl: 1.25 },
-    magwell: { pos: [-0.04, -0.11, 0.0], fwd: [0.35, 0.7, -0.5], back: [-0.95, 0, -0.1], curl: 0.6 },
-    handle: { part: 'handle', pos: [-0.03, 0.0, 0.16], fwd: [0.65, 0.3, -0.6], back: [-0.4, 0.9, 0.1], curl: 0.9 },
+    // Wrist behind and right of the pistol grip, knuckles across it, fingers wrap the front.
+    grip: { pos: [0.03, -0.072, 0.14], fwd: [-0.55, 0.0, -0.84], back: [0.88, 0.45, 0.1], curl: 1.6 },
+    // Support hand cups the handguard from below-left, fingers wrap up its right side.
+    guard: { pos: [-0.03, -0.045, -0.18], fwd: [0.65, -0.15, -0.74], back: [-0.55, -0.83, 0], curl: 1.8 },
+    mag: { part: 'mag', pos: [-0.03, -0.15, -0.03], fwd: [0.25, 0.95, 0], back: [-0.95, 0.2, 0.2], curl: 1.6 },
+    magwell: { pos: [-0.045, -0.1, -0.01], fwd: [0.4, 0.6, -0.6], back: [-0.9, 0.1, -0.2], curl: 0.9 },
+    handle: { part: 'handle', pos: [-0.035, 0.005, 0.175], fwd: [0.6, 0.3, -0.7], back: [-0.4, 0.9, 0.1], curl: 1.5 },
   },
+  colliders: [
+    { a: [0, 0, -0.29], b: [0, 0, -0.1], r: 0.029 }, // handguard
+    { a: [0, 0, -0.1], b: [0, 0, 0.12], r: 0.03 }, // upper receiver
+    { a: [0, -0.045, -0.06], b: [0, -0.045, 0.02], r: 0.022 }, // magwell
+    { a: [0, -0.045, 0.072], b: [0, -0.155, 0.112], r: 0.017 }, // pistol grip
+    { a: [0, -0.06, 0.02], b: [0, -0.06, 0.06], r: 0.012 }, // trigger guard
+    { part: 'mag', a: [0, -0.03, -0.035], b: [0, -0.135, -0.045], r: 0.017 }, // magazine
+    { a: [0, -0.01, 0.15], b: [0, -0.02, 0.36], r: 0.022 }, // buffer tube / stock
+  ],
   restLeft: 'guard',
   restRight: 'grip',
   hipPos: [0.13, -0.16, -0.32],
@@ -210,7 +233,7 @@ const M4: WeaponDef = {
     },
     reloadEmpty: {
       length: 2.65,
-      events: [[0.32, 'mag_out'], [0.5, 'drop:mag'], [0.85, 'mag_drop'], [1.4, 'mag_in'], [1.4, 'ammo'],
+      events: [[0.32, 'mag_out'], [0.5, 'drop:mag'], [1.4, 'mag_in'], [1.4, 'ammo'],
         [1.76, 'charge_back'], [1.97, 'charge_fwd'], [2.45, 'ready']],
       hands: [[0.2, 'mag'], [0.48, 'magwell'], [0.72, 'mag'], [1.5, 'handle'], [2.1, 'guard']],
       // The dropped mag becomes a physics prop; the fresh one appears in the hand off-screen.
@@ -254,11 +277,19 @@ const PISTOL: WeaponDef = {
   fireParts: { slide: [0, 0, 0.028] },
   lockOnEmpty: ['slide'],
   hands: {
-    grip: { pos: [0.004, -0.038, 0.075], fwd: [-0.35, 0.05, -0.93], back: [0.95, 0.3, 0], curl: 1.1 },
-    support: { pos: [-0.02, -0.05, 0.065], fwd: [0.5, 0.2, -0.84], back: [-0.7, -0.7, 0], curl: 1.0 },
-    mag: { part: 'mag', pos: [-0.02, -0.07, 0.11], fwd: [0.3, 0.8, -0.5], back: [-0.95, 0, -0.1], curl: 0.75 },
-    slide: { part: 'slide', pos: [-0.035, 0.07, 0.07], fwd: [0.7, 0.2, -0.65], back: [-0.3, 0.95, 0], curl: 0.9 },
+    grip: { pos: [0.02, 0.006, 0.098], fwd: [-0.45, -0.08, -0.89], back: [0.9, 0.42, 0], curl: 1.7 },
+    // Support hand wraps over the shooting hand's fingers from the left
+    support: { pos: [-0.048, -0.035, 0.085], fwd: [0.6, 0.05, -0.8], back: [-0.75, -0.65, 0.1], curl: 1.8 },
+    mag: { part: 'mag', pos: [-0.025, -0.08, 0.11], fwd: [0.3, 0.9, -0.3], back: [-0.95, 0, 0.1], curl: 1.4 },
+    slide: { part: 'slide', pos: [-0.04, 0.075, 0.075], fwd: [0.7, 0.2, -0.65], back: [-0.3, 0.95, 0], curl: 1.4 },
   },
+  colliders: [
+    { a: [0, 0.062, -0.175], b: [0, 0.062, 0.04], r: 0.016, part: 'slide' }, // slide
+    { a: [0, 0.03, -0.07], b: [0, 0.03, 0.03], r: 0.015 }, // frame
+    { a: [0, 0.022, 0.02], b: [0, -0.045, 0.033], r: 0.017 }, // grip
+    { a: [0, 0.012, -0.055], b: [0, 0.012, -0.015], r: 0.01 }, // trigger guard
+    { a: [0, 0.008, -0.012], b: [0, -0.05, 0.002], r: 0.024, hand: 'l' }, // shooting hand's fingers
+  ],
   restLeft: 'support',
   restRight: 'grip',
   hipPos: [0.12, -0.13, -0.32],
@@ -337,11 +368,18 @@ const SNIPER: WeaponDef = {
   hideNodes: ['bolt_action_rifle_7_62_bullet_54mm'],
   parts: { bolt: ['bolt_action_rifle_7_62_bolt_a', 'bolt_action_rifle_7_62_bolt_b'] },
   hands: {
-    grip: { pos: [0.01, -0.085, 0.37], fwd: [-0.35, 0.15, -0.92], back: [0.95, 0.3, 0], curl: 0.85 },
-    guard: { pos: [-0.006, -0.075, 0.02], fwd: [0.45, 0.2, -0.87], back: [-0.35, -0.94, 0], curl: 1.2 },
-    bolt: { part: 'bolt', pos: [0.06, 0.0, 0.3], fwd: [-0.2, 0.55, -0.8], back: [0.9, 0.2, 0.3], curl: 0.95 },
-    port: { pos: [0.03, 0.02, 0.27], fwd: [-0.55, 0.1, -0.83], back: [0.3, 0.95, 0], curl: 0.7 },
+    grip: { pos: [0.032, -0.03, 0.44], fwd: [-0.55, 0.05, -0.84], back: [0.88, 0.45, 0.1], curl: 1.6 },
+    guard: { pos: [-0.02, -0.015, 0.1], fwd: [0.35, 0.4, -0.85], back: [-0.6, -0.8, 0], curl: 1.7 },
+    bolt: { part: 'bolt', pos: [0.065, 0.0, 0.3], fwd: [-0.2, 0.55, -0.8], back: [0.9, 0.2, 0.3], curl: 1.5 },
+    port: { pos: [0.035, 0.03, 0.28], fwd: [-0.55, 0.1, -0.83], back: [0.3, 0.95, 0], curl: 1.0 },
   },
+  colliders: [
+    { a: [0, 0.05, -0.6], b: [0, 0.05, 0.02], r: 0.012 }, // barrel
+    { a: [0, 0.035, 0.04], b: [0, 0.035, 0.15], r: 0.026 }, // forend
+    { a: [0, 0.03, 0.16], b: [0, 0.03, 0.27], r: 0.03 }, // action
+    { a: [0, 0.0, 0.33], b: [0, -0.025, 0.45], r: 0.021 }, // stock wrist
+    { a: [0, -0.04, 0.45], b: [0, -0.06, 0.62], r: 0.035 }, // buttstock
+  ],
   restLeft: 'guard',
   restRight: 'grip',
   hipPos: [0.17, -0.19, -0.47],
@@ -438,6 +476,16 @@ export async function weaponModel(def: WeaponDef): Promise<THREE.Object3D> {
     const r = def.redDot;
     // Lens positions are given in the rotated frame; undo the rotation for the child.
     const optic = redDotOptic(r.height, r.front, r.rear, r.radius);
+    // The model's sight tube is a one-sided shell: from behind the sight you saw the world
+    // through its wall. A matte black sleeve rendered from the inside gives it a real bore.
+    const len = Math.abs(r.front - r.rear) + 0.012;
+    const sleeve = new THREE.Mesh(
+      new THREE.CylinderGeometry(r.radius * 1.12, r.radius * 1.12, len, 40, 1, true).rotateX(Math.PI / 2),
+      new THREE.MeshStandardMaterial({ color: 0x0b0b0c, roughness: 0.92, metalness: 0.1, side: THREE.BackSide }),
+    );
+    sleeve.name = 'sight-bore';
+    sleeve.position.set(0, r.height, (r.front + r.rear) / 2);
+    optic.add(sleeve);
     optic.rotation.set(-def.modelRotation[0], -def.modelRotation[1], -def.modelRotation[2]);
     model.add(optic);
   }

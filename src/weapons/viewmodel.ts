@@ -38,6 +38,7 @@ interface Casing {
   vel: THREE.Vector3;
   spin: THREE.Vector3;
   t: number;
+  born: number;
 }
 
 export class Viewmodel {
@@ -142,6 +143,22 @@ export class Viewmodel {
     }
   }
 
+  /** A holder-space point riding on a part's current offset/rotation (or fixed when no part). */
+  partPoint(role: string | undefined, p: V3, out = new THREE.Vector3()): THREE.Vector3 {
+    out.set(p[0], p[1], p[2]);
+    const part = role ? this.parts.get(role) : undefined;
+    if (part) {
+      const o = part.nodes[0].origin;
+      out.sub(o).applyQuaternion(part.rot).add(o).add(part.offset);
+    }
+    return out;
+  }
+
+  /** Whether a part is currently shown (hidden mags shouldn't stop fingers). */
+  partVisible(role: string): boolean {
+    return this.parts.get(role)?.nodes[0].node.visible ?? true;
+  }
+
   /** A loose copy of a part in world space (for dropping a magazine). */
   detachCopy(role: string): THREE.Object3D | null {
     const p = this.parts.get(role);
@@ -167,6 +184,7 @@ export class Viewmodel {
       vel: new THREE.Vector3(1.4 + r * 0.8, 1.0 + Math.random() * 0.7, 0.2 + Math.random() * 0.3),
       spin: new THREE.Vector3(Math.random() * 20, 15 + Math.random() * 20, Math.random() * 10),
       t: 0,
+      born: performance.now(),
     });
   }
 
@@ -179,7 +197,8 @@ export class Viewmodel {
       c.mesh.rotation.x += c.spin.x * dt;
       c.mesh.rotation.y += c.spin.y * dt;
       c.mesh.rotation.z += c.spin.z * dt;
-      if (c.t > 0.7) {
+      // Wall-clock expiry too, so a paused or throttled frame loop never leaves one hanging in view
+      if (c.t > 0.7 || performance.now() - c.born > 1500) {
         c.mesh.removeFromParent();
         this.casings.splice(i, 1);
       }

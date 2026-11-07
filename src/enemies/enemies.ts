@@ -9,6 +9,7 @@ import { WEAPONS, weaponModel } from '../weapons/weapons';
 import type { CoverMap, CoverPoint } from '../world/cover';
 import type { Effects } from '../world/effects';
 import { flashTexture } from '../world/effects';
+import { surfaceAt } from '../world/map';
 import type { NavSystem } from '../world/navmesh';
 import { lineOfSight, raycastBoxes, raySegment, raySphere } from '../world/physics';
 import { RAPIER, type PhysicsWorld } from '../world/physics3d';
@@ -814,7 +815,7 @@ export class Enemy {
       if (this.stepT <= 0) {
         this.stepT = 2.6;
         if (this.position.distanceTo(p.position) < 30) {
-          if (!ctx.audio.play('footstep', { pos: this.position, gain: speed > 3.5 ? 0.9 : 0.5 })) ctx.audio.footstep(this.position, 1.1);
+          ctx.audio.step(surfaceAt(this.position), this.position, speed > 3.5 ? 1.1 : 0.6);
         }
       }
     }

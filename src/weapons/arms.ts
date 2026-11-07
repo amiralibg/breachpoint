@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
-import { curlFingers, measureHand, orientHand, twoBoneIK, worldPos, type HandFrame } from '../core/ik';
+import { curlFingersContact, measureHand, orientHand, palmPenetration, twoBoneIK, worldPos, type Capsule, type HandFrame } from '../core/ik';
 import { facingAngle } from '../enemies/retarget';
 
 const ARM_SCALE = 1.12;
@@ -65,8 +65,12 @@ export class FpArms {
     }
   }
 
-  /** Solve both arms. `sway` shifts the shoulders a little so the body follows the gun. */
-  update(left: HandTarget, right: HandTarget, sway: THREE.Vector3): void {
+  /**
+   * Solve both arms. `sway` shifts the shoulders a little so the body follows the gun.
+   * `gun` holds the weapon's collider capsules (view space): palms are pushed out of them and
+   * fingers curl until they touch them.
+   */
+  update(left: HandTarget, right: HandTarget, sway: THREE.Vector3, gun: Capsule[] = []): void {
     this.bones.forEach((b, i) => {
       b.quaternion.copy(this.rest[i]);
       b.position.copy(this.restPos[i]);
@@ -78,10 +82,18 @@ export class FpArms {
     // Elbows point down and out, like a real carry
     const poleR = this.shoulderR.clone().add(new THREE.Vector3(0.5, -1, 0.3));
     const poleL = this.shoulderL.clone().add(new THREE.Vector3(-0.6, -1, 0.1));
-    for (const [side, t, pole] of [[this.r, right, poleR], [this.l, left, poleL]] as const) {
-      twoBoneIK(side.arm, side.fore, side.hand.hand, t.pos, pole);
-      orientHand(side.hand, t.fwd, t.back);
-      curlFingers(side.hand, t.curl);
+    const n = new THREE.Vector3();
+    for (const [side, t, pole, tag] of [[this.r, right, poleR, 'r'], [this.l, left, poleL, 'l']] as const) {
+      const caps = gun.filter((c) => !c.hand || c.hand === tag);
+      const target = t.pos.clone();
+      for (let iter = 0; iter < 4; iter++) {
+        twoBoneIK(side.arm, side.fore, side.hand.hand, target, pole);
+        orientHand(side.hand, t.fwd, t.back);
+        const pen = palmPenetration(side.hand, caps, n);
+        if (pen < 0.001) break;
+        target.addScaledVector(n, pen + 0.001);
+      }
+      curlFingersContact(side.hand, t.curl, caps);
     }
   }
 

@@ -133,3 +133,102 @@ export function curlFingers(h: HandFrame, curl: number): void {
   const thumbAxis = fwd.clone().addScaledVector(axis, 0.3).normalize();
   h.thumb.forEach((b, i) => rotateAxis(b, thumbAxis, curl * (i === 0 ? 0.25 : 0.45) * (h.hand.name.includes('Right') ? 1 : -1)));
 }
+
+/** Capsule in world space (a hand collider proxy). */
+export interface Capsule {
+  a: THREE.Vector3;
+  b: THREE.Vector3;
+  r: number;
+  hand?: 'l' | 'r';
+}
+
+const _cp = new THREE.Vector3();
+const _ab = new THREE.Vector3();
+
+/** Penetration depth of point p (with radius pad) into the capsule, and the outward normal. */
+export function capsulePenetration(c: Capsule, p: THREE.Vector3, pad: number, outNormal?: THREE.Vector3): number {
+  _ab.subVectors(c.b, c.a);
+  const t = THREE.MathUtils.clamp(_cp.subVectors(p, c.a).dot(_ab) / Math.max(1e-9, _ab.lengthSq()), 0, 1);
+  _cp.copy(c.a).addScaledVector(_ab, t);
+  const d = p.distanceTo(_cp);
+  if (outNormal) outNormal.subVectors(p, _cp).divideScalar(Math.max(1e-6, d));
+  return c.r + pad - d;
+}
+
+function anyInside(points: THREE.Vector3[], caps: Capsule[], pad: number): boolean {
+  for (const p of points) for (const c of caps) if (capsulePenetration(c, p, pad) > 0) return true;
+  return false;
+}
+
+function chainPoints(chain: THREE.Bone[], from: number): THREE.Vector3[] {
+  const pts: THREE.Vector3[] = [];
+  for (let k = from + 1; k < chain.length; k++) pts.push(worldPos(chain[k]));
+  const n = chain.length;
+  if (n >= 2) {
+    const last = worldPos(chain[n - 1]);
+    const prev = worldPos(chain[n - 2]);
+    pts.push(last.clone().add(last.clone().sub(prev).multiplyScalar(0.8))); // fingertip
+  }
+  return pts;
+}
+
+/**
+ * Curl each finger joint by joint toward the palm until it touches one of the capsules
+ * (up to `curl`), so fingers wrap around grips and handguards instead of sinking into them.
+ * A finger that starts inside keeps curling until it comes out and touches again.
+ */
+export function curlFingersContact(h: HandFrame, curl: number, caps: Capsule[]): void {
+  const hq = h.hand.getWorldQuaternion(new THREE.Quaternion());
+  const fwd = h.fwdLocal.clone().applyQuaternion(hq);
+  const back = h.backLocal.clone().applyQuaternion(hq);
+  const axis = new THREE.Vector3().crossVectors(back, fwd).normalize();
+  const thumbAxis = fwd.clone().addScaledVector(axis, 0.3).normalize().multiplyScalar(h.hand.name.includes('Right') ? 1 : -1);
+  const pad = 0.008;
+  // Thumb: lay it forward along the grip, angled toward the palm, instead of sticking up
+  if (h.thumb.length >= 2) {
+    const t0 = worldPos(h.thumb[0]);
+    const dir = fwd.clone().multiplyScalar(0.8).addScaledVector(back, -0.55).normalize();
+    aimBone(h.thumb[0], h.thumb[1], t0.addScaledVector(dir, 0.05), Math.min(1, curl));
+  }
+  const chains: [THREE.Bone[], THREE.Vector3, number[]][] = [
+    ...h.fingers.map((f) => [f, axis, [0.85, 1.25, 0.9]] as [THREE.Bone[], THREE.Vector3, number[]]),
+    [h.thumb.slice(1), thumbAxis, [0.35, 0.35]],
+  ];
+  for (const [chain, ax, per] of chains) {
+    for (let j = 0; j < chain.length; j++) {
+      const steps = 8;
+      const step = (curl * per[j]) / steps;
+      let wasInside = anyInside(chainPoints(chain, j), caps, pad);
+      for (let s = 0; s < steps; s++) {
+        rotateAxis(chain[j], ax, step);
+        const inside = anyInside(chainPoints(chain, j), caps, pad);
+        if (inside && !wasInside) {
+          rotateAxis(chain[j], ax, -step); // touched: back off one step and stop this joint
+          break;
+        }
+        wasInside = inside;
+      }
+    }
+  }
+}
+
+/** How far the palm sinks into the capsules (max over a few palm points) and which way is out. */
+export function palmPenetration(h: HandFrame, caps: Capsule[], outNormal: THREE.Vector3): number {
+  const wrist = worldPos(h.hand);
+  const knuckles = worldPos(h.fingers[1][0]);
+  const idx = worldPos(h.fingers[0][0]);
+  const pinky = worldPos(h.fingers[3][0]);
+  const pts = [wrist.clone().lerp(knuckles, 0.25), wrist.clone().lerp(knuckles, 0.6), knuckles, idx, pinky];
+  let best = 0;
+  const n = new THREE.Vector3();
+  for (const p of pts) {
+    for (const c of caps) {
+      const d = capsulePenetration(c, p, 0.013, n);
+      if (d > best) {
+        best = d;
+        outNormal.copy(n);
+      }
+    }
+  }
+  return best;
+}

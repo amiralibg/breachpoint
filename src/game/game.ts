@@ -13,7 +13,7 @@ import { Viewmodel } from '../weapons/viewmodel';
 import { WEAPONS } from '../weapons/weapons';
 import { CoverMap } from '../world/cover';
 import { Effects } from '../world/effects';
-import { buildMap, type WorldMap } from '../world/map';
+import { buildMap, surfaceAt, type WorldMap } from '../world/map';
 import { initNavigation, NavSystem } from '../world/navmesh';
 import { lineOfSight, raycastBoxes } from '../world/physics';
 import { initPhysics, PhysicsWorld } from '../world/physics3d';
@@ -144,13 +144,19 @@ export class Game {
     ev.on('fire', (e) => {
       const def = WEAPONS.find((w) => w.id === e.weapon)!;
       this.audio?.gunshot(def.soundPower, undefined, def.sound as SampleName);
+      // Brass hits the ground a moment later (bolt guns eject when the bolt is worked)
+      if (!def.anims.cycle) this.audio?.play('casing', { gain: 0.22, delay: 0.35 + Math.random() * 0.15, rate: def.id === 'pistol' ? 1.15 : 1 });
     });
     ev.on('dryFire', () => {
       if (!this.audio?.play('dry_fire', { gain: 0.9 })) this.audio?.click(undefined, 0.7);
     });
     ev.on('weaponSound', (e) => {
+      if (e.sound === 'casing') {
+        this.audio?.play('casing', { gain: 0.25, delay: 0.4 });
+        return;
+      }
       const name = e.sound as SampleName;
-      if (!this.audio?.play(name, { gain: 0.8 })) this.audio?.click(undefined, 0.9);
+      if (!this.audio?.play(name, { gain: name === 'holster' ? 0.5 : 0.85, wet: 0.06 })) this.audio?.click(undefined, 0.9);
     });
     ev.on('impact', (e) => {
       const p = vec(e.point);
@@ -205,8 +211,8 @@ export class Game {
     w.onDropPart = (obj, vel) => this.dropProp(obj, vel.add(this.player.velocity), 0.5);
     this.player.onFootstep = () => {
       if (!this.audio) return;
-      const loud = this.player.sprinting ? 1.3 : 0.8;
-      if (!this.audio.play('footstep', { gain: loud * 0.7 })) this.audio.footstep(undefined, loud);
+      const loud = this.player.sprinting ? 0.85 : this.player.crouching ? 0.3 : 0.55;
+      this.audio.step(surfaceAt(this.player.position), undefined, loud);
       this.enemies.playerNoise(this.player.position, this.player.sprinting ? 20 : 11, 'step');
     };
   }

@@ -2,15 +2,21 @@ import * as THREE from 'three';
 
 const SAMPLE_NAMES = [
   'm4_shot', 'pistol_shot', 'sniper_shot', 'mag_out', 'mag_in', 'mag_drop', 'charge_back', 'charge_fwd',
-  'bolt', 'slide', 'round_in', 'dry_fire', 'holster', 'whiz', 'impact', 'flesh', 'footstep', 'hitmarker',
+  'bolt', 'slide', 'round_in', 'dry_fire', 'holster', 'whiz', 'impact', 'flesh', 'hitmarker',
 ] as const;
-export type SampleName = (typeof SAMPLE_NAMES)[number];
+/** Sounds with numbered variants (`<name>_0.wav` ...); one is picked at random, never twice in a row. */
+const VARIANTS = { footstep_dirt: 6, footstep_hard: 6, casing: 3 } as const;
+export type SampleName = (typeof SAMPLE_NAMES)[number] | keyof typeof VARIANTS;
+const FILES: string[] = [
+  ...SAMPLE_NAMES,
+  ...Object.entries(VARIANTS).flatMap(([n, k]) => Array.from({ length: k }, (_, i) => `${n}_${i}`)),
+];
 
 let rawSamples: Promise<Map<string, ArrayBuffer>> | null = null;
 
 /** Fetch the sound files (no AudioContext needed yet, so this can run during loading). */
 export function preloadSamples(): Promise<Map<string, ArrayBuffer>> {
-  rawSamples ??= Promise.all(SAMPLE_NAMES.map(async (n): Promise<[string, ArrayBuffer] | null> => {
+  rawSamples ??= Promise.all(FILES.map(async (n): Promise<[string, ArrayBuffer] | null> => {
     try {
       const r = await fetch(`${import.meta.env.BASE_URL}assets/audio/${n}.wav`);
       return r.ok ? [n, await r.arrayBuffer()] : null;
@@ -22,8 +28,9 @@ export function preloadSamples(): Promise<Map<string, ArrayBuffer>> {
 }
 
 /**
- * Procedural sound effects using the Web Audio API (no audio files needed).
- * Positional sounds are panned and attenuated relative to the listener.
+ * Sound: recorded/synthesized samples (scripts/make_sounds.py) plus a few procedural effects.
+ * Positional sounds are HRTF-panned, attenuated and muffled with distance, and sent to a
+ * convolution reverb that models the walled compound (early slap-back off the walls + tail).
  */
 export class Audio {
   readonly ctx: AudioContext;
@@ -31,6 +38,9 @@ export class Audio {
   private noise: AudioBuffer;
   private listenerPos = new THREE.Vector3();
   private samples = new Map<string, AudioBuffer>();
+  private lastVariant = new Map<string, number>();
+  private reverb: ConvolverNode;
+  private wetBus: GainNode;
 
   constructor(volume: number) {
     this.ctx = new AudioContext();
@@ -40,6 +50,11 @@ export class Audio {
     comp.threshold.value = -12;
     comp.ratio.value = 4;
     this.master.connect(comp).connect(this.ctx.destination);
+    this.reverb = this.ctx.createConvolver();
+    this.reverb.buffer = this.impulse(1.8);
+    this.wetBus = this.ctx.createGain();
+    this.wetBus.gain.value = 0.9;
+    this.wetBus.connect(this.reverb).connect(this.master);
 
     const len = this.ctx.sampleRate * 1.5;
     this.noise = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
@@ -61,8 +76,16 @@ export class Audio {
    * Play a recorded sound. Positional sounds are panned, and far ones lose their highs
    * (distant gunfire is a dull thump, not a crack).
    */
-  play(name: SampleName, opts: { pos?: THREE.Vector3; gain?: number; rate?: number; delay?: number } = {}): boolean {
-    const buf = this.samples.get(name);
+  play(name: SampleName, opts: { pos?: THREE.Vector3; gain?: number; rate?: number; delay?: number; wet?: number } = {}): boolean {
+    let file: string = name;
+    const k = (VARIANTS as Record<string, number>)[name];
+    if (k) {
+      let i = Math.floor(Math.random() * k);
+      if (i === this.lastVariant.get(name)) i = (i + 1) % k;
+      this.lastVariant.set(name, i);
+      file = `${name}_${i}`;
+    }
+    const buf = this.samples.get(file);
     if (!buf) return false;
     const t = this.ctx.currentTime + (opts.delay ?? 0);
     const src = this.ctx.createBufferSource();
@@ -80,7 +103,7 @@ export class Audio {
         node = node.connect(lp);
       }
     }
-    node.connect(this.out(opts.pos));
+    node.connect(this.out(opts.pos, opts.wet));
     src.start(t);
     return true;
   }
@@ -112,8 +135,48 @@ export class Audio {
     }
   }
 
-  private out(pos?: THREE.Vector3): AudioNode {
+  /** Stereo impulse response: sparse early reflections (compound walls) and a diffuse tail. */
+  private impulse(seconds: number): AudioBuffer {
+    const len = Math.floor(this.ctx.sampleRate * seconds);
+    const buf = this.ctx.createBuffer(2, len, this.ctx.sampleRate);
+    for (let c = 0; c < 2; c++) {
+      const d = buf.getChannelData(c);
+      for (let i = 0; i < len; i++) {
+        const t = i / this.ctx.sampleRate;
+        // Diffuse tail, darker as it decays
+        d[i] = (Math.random() * 2 - 1) * Math.exp(-t * 3.2) * 0.35 * (t < 0.02 ? t / 0.02 : 1);
+      }
+      for (const [at, g] of [[0.045, 0.6], [0.09, 0.45], [0.14, 0.3], [0.21, 0.22], [0.3, 0.12]]) {
+        const j = Math.floor((at + (c ? 0.007 : 0)) * this.ctx.sampleRate);
+        for (let k = 0; k < 90; k++) d[j + k] += (Math.random() * 2 - 1) * g * Math.exp(-k / 25);
+      }
+      // One-pole low-pass so the tail isn't hissy
+      let y = 0;
+      for (let i = 0; i < len; i++) {
+        const a = 0.35 - 0.25 * Math.min(1, i / len * 2);
+        y += a * (d[i] - y);
+        d[i] = y;
+      }
+    }
+    return buf;
+  }
+
+  private out(pos?: THREE.Vector3, wet?: number): AudioNode {
+    const send = wet ?? (pos ? 0.35 : 0.1);
+    if (send > 0) {
+      // Split to the dry path and the reverb send
+      const split = this.ctx.createGain();
+      const s = this.ctx.createGain();
+      s.gain.value = send;
+      split.connect(s).connect(this.wetBus);
+      split.connect(pos ? this.panner(pos) : this.master);
+      return split;
+    }
     if (!pos) return this.master;
+    return this.panner(pos);
+  }
+
+  private panner(pos: THREE.Vector3): AudioNode {
     const p = this.ctx.createPanner();
     p.panningModel = 'HRTF';
     p.distanceModel = 'inverse';
@@ -158,11 +221,7 @@ export class Audio {
   /** Gunshot. `power` ~1 for pistol, ~1.6 for rifle. */
   gunshot(power: number, pos?: THREE.Vector3, sample?: SampleName): void {
     const t = this.ctx.currentTime;
-    if (sample && this.play(sample, { pos, gain: pos ? 1.1 : 0.9 })) {
-      // Slap-back echo off the compound walls on top of the recording
-      this.noiseBurst(this.out(pos), t + 0.11, 0.6 * power, 0.1, 900, 80);
-      return;
-    }
+    if (sample && this.play(sample, { pos, gain: pos ? 1.1 : 0.85, wet: pos ? 0.55 : 0.4 })) return;
     const dest = this.out(pos);
     this.noiseBurst(dest, t, 0.09 * power, 1.2, 9000, 1200, 1.2); // crack
     this.noiseBurst(dest, t, 0.45 * power, 0.7, 2500, 120); // body / room tail
@@ -210,6 +269,14 @@ export class Audio {
     const dest = this.out(pos);
     this.noiseBurst(dest, t, 0.08, 0.5, 1400, 200);
     this.thump(dest, t, 90, 0.08, 0.4);
+  }
+
+  /** Footstep on a surface (falls back to a noise burst before samples load). */
+  step(surface: 'dirt' | 'hard', pos?: THREE.Vector3, loud = 1): void {
+    const ok = this.play(surface === 'dirt' ? 'footstep_dirt' : 'footstep_hard', {
+      pos, gain: loud, rate: 0.92 + Math.random() * 0.16, wet: pos ? 0.2 : 0.05,
+    });
+    if (!ok) this.footstep(pos, loud);
   }
 
   footstep(pos?: THREE.Vector3, loud = 1): void {

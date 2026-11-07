@@ -230,6 +230,7 @@ export class WeaponController {
         this.dropPart(ev.slice(5));
       } else if (ev === 'eject') {
         w.vm.eject();
+        this.onSound?.('casing');
       } else {
         this.onSound?.(ev);
       }
@@ -475,7 +476,11 @@ export class WeaponController {
       if (showGun) {
         const L = this.handTarget('l', d.restLeft);
         const R = this.handTarget('r', d.restRight);
-        this.arms.update(L, R, new THREE.Vector3(pos.x - d.hipPos[0], 0, 0).multiplyScalar(0.3));
+        const m = vm.group.matrix;
+        const caps = d.colliders
+          .filter((c) => !c.part || vm.partVisible(c.part))
+          .map((c) => ({ a: vm.partPoint(c.part, c.a).applyMatrix4(m), b: vm.partPoint(c.part, c.b).applyMatrix4(m), r: c.r, hand: c.hand }));
+        this.arms.update(L, R, new THREE.Vector3(pos.x - d.hipPos[0], 0, 0).multiplyScalar(0.3), caps);
       }
     }
 
