@@ -8,6 +8,9 @@ public/assets/*
 !public/assets/characters/
 public/assets/characters/*
 !public/assets/characters/us_soldier.glb
+!public/assets/characters/fp_arms.glb
+!public/assets/characters/soldier_ksk.glb
+!public/assets/characters/soldier_bw.glb
 !public/assets/models/
 public/assets/models/*
 !public/assets/models/m4/

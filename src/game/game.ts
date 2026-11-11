@@ -1,10 +1,11 @@
 import * as THREE from 'three';
 import { Audio, preloadSamples, type SampleName } from '../core/audio';
+import { loadGlb } from '../core/assets';
 import { Input } from '../core/input';
 import { Renderer } from '../core/renderer';
 import { QUALITY_PRESETS, type QualityPreset, type Settings } from '../core/settings';
 import { EnemyManager, type Enemy } from '../enemies/enemies';
-import { TICK_DT, type HitZone, type Vec3 } from '../net/protocol';
+import { TICK_DT, Btn, type HitZone, type Vec3 } from '../net/protocol';
 import { Player } from '../player/player';
 import { Hud } from '../ui/hud';
 import { FpArms } from '../weapons/arms';
@@ -13,10 +14,11 @@ import { Viewmodel } from '../weapons/viewmodel';
 import { WEAPONS } from '../weapons/weapons';
 import { CoverMap } from '../world/cover';
 import { Effects } from '../world/effects';
-import { buildMap, surfaceAt, type WorldMap } from '../world/map';
+import { buildMap, makeFog, surfaceAt, type WorldMap } from '../world/map';
 import { initNavigation, NavSystem } from '../world/navmesh';
 import { lineOfSight, raycastBoxes } from '../world/physics';
 import { initPhysics, PhysicsWorld } from '../world/physics3d';
+import { LootManager, type InteractCandidate } from '../world/loot';
 import { CommandBuilder } from './commands';
 import { EventBus } from './events';
 import { createMode, type GameMode, type ModeId } from './modes';
@@ -28,6 +30,8 @@ const ZONE_MULT: Record<HitZone, (w: WeaponState) => number> = {
   arm: (w) => w.def.limbMultiplier,
   leg: (w) => w.def.limbMultiplier,
 };
+/** Handling sounds worth a stand-in click while the samples are still loading. */
+const FALLBACK_CLICKS = new Set(['mag_out', 'mag_in', 'charge_fwd', 'slide', 'bolt']);
 const v3 = (v: THREE.Vector3): Vec3 => [v.x, v.y, v.z];
 const vec = (a: Vec3): THREE.Vector3 => new THREE.Vector3(a[0], a[1], a[2]);
 
@@ -44,7 +48,7 @@ export class Game {
   readonly camera = new THREE.PerspectiveCamera(80, 1, 0.05, 600);
   private viewScene = new THREE.Scene();
   private viewCamera = new THREE.PerspectiveCamera(58, 1, 0.01, 10);
-  private viewSun = new THREE.DirectionalLight(0xfff1dc, 2.4);
+  private viewSun = new THREE.DirectionalLight(0xffc089, 2.6);
   private worldFlash = new THREE.PointLight(0xffb060, 0, 12, 2);
   readonly renderer: Renderer;
   readonly input: Input;
@@ -56,10 +60,13 @@ export class Game {
   weapons!: WeaponController;
   readonly effects: Effects;
   phys!: PhysicsWorld;
+  loot!: LootManager;
+  private activeInteract: InteractCandidate | null = null;
   map!: WorldMap;
   private nav!: NavSystem;
   private cover!: CoverMap;
   private commands = new CommandBuilder();
+  private wasAiming = false;
   mode: GameMode | null = null;
   state: GameState = 'menu';
   private preset: QualityPreset;
@@ -86,7 +93,12 @@ export class Game {
     this.enemies = new EnemyManager(this.scene);
     this.effects = new Effects(this.scene, this.preset.decals);
     this.scene.add(this.camera, this.worldFlash);
-    this.viewScene.add(this.viewSun, new THREE.AmbientLight(0xffffff, 0.15));
+    this.viewScene.add(this.viewSun, new THREE.HemisphereLight(0x8fa6cf, 0x5a4636, 0.5));
+    // Sky fill fixed to the view, from above and behind the left shoulder: whichever way the
+    // player faces, the gun's top edges catch a cool highlight and its shadow side keeps its shape.
+    const viewFill = new THREE.DirectionalLight(0xa9c1ee, 0.85);
+    viewFill.position.set(-1.6, 2.4, 1.2);
+    this.viewScene.add(viewFill);
 
     this.input.onUnlock = () => {
       if (this.state === 'playing') this.setState('paused');
@@ -104,16 +116,26 @@ export class Game {
     void preloadSamples();
     await Promise.all([initPhysics(), initNavigation()]);
     this.phys = new PhysicsWorld();
+    this.loot = new LootManager(this.scene, this.phys);
     this.enemies.setPhysics(this.phys);
     this.enemies.onMagDrop = (mag, vel) => this.dropProp(mag, vel, 0.6);
+    this.enemies.onDropGun = (_enemy, pivot, vel, def, ammo, size, center) => {
+      this.loot.spawnWeaponDrop(def, pivot, pivot.position, vel, ammo, { size, center });
+    };
+    this.enemies.onEnemyDeath = (enemy, def, ammo) => {
+      this.loot.registerCasualty(enemy, def, Math.max(10, Math.floor(ammo * (0.6 + Math.random() * 0.4))));
+    };
     await Promise.all([this.loadMap(), this.enemies.load()]);
-    const states: WeaponState[] = await Promise.all(WEAPONS.map(async (def) => ({
+    const states: WeaponState[] = await Promise.all(WEAPONS.map(async (def, _idx) => ({
       def, mag: def.magSize, reserve: def.reserve, vm: await Viewmodel.create(def),
+      unlocked: true, // all weapons available in wave survival; unlockable in story missions
     })));
-    const proto = this.enemies.characterScene;
-    const arms = proto ? new FpArms(proto, true) : null;
+    // Purpose-built first-person arms; the soldier's own arms stand in if the file is missing.
+    const armsModel = await loadGlb('characters/fp_arms.glb').then((g) => g.scene, () => this.enemies.characterScene);
+    const arms = armsModel ? new FpArms(armsModel, true) : null;
     this.weapons = new WeaponController(states, this.viewScene, this.worldFlash, arms);
     this.weapons.cameraRef = this.camera;
+    this.weapons.setObstacleColliders(this.map.colliders);
     this.wireWeaponEvents();
     this.weapons.setVisible(false);
     this.renderer.apply(this.preset);
@@ -125,14 +147,16 @@ export class Game {
 
   private async loadMap(): Promise<void> {
     this.map?.dispose();
-    this.map = await buildMap(this.scene, this.preset);
+    this.map = await buildMap(this.scene, this.preset, this.renderer.gl);
+    this.renderer.setSun(this.map.sunDir, this.map.sunColor, 0.4, this.map.sun);
     this.viewScene.environment = this.map.envMap;
-    this.viewScene.environmentIntensity = 0.6;
+    this.viewScene.environmentIntensity = 0.9;
     this.nav?.dispose();
     this.nav = new NavSystem(this.map.bounds, this.map.colliders);
     this.enemies.nav = this.nav;
     this.cover = new CoverMap(this.map.colliders, this.nav);
     this.phys.setStatics(this.map.colliders);
+    this.weapons?.setObstacleColliders(this.map.colliders);
     this.loadedTexRes = `${this.preset.textureRes}/${this.preset.hdriRes}`;
   }
 
@@ -145,25 +169,26 @@ export class Game {
       const def = WEAPONS.find((w) => w.id === e.weapon)!;
       this.audio?.gunshot(def.soundPower, undefined, def.sound as SampleName);
       // Brass hits the ground a moment later (bolt guns eject when the bolt is worked)
-      if (!def.anims.cycle) this.audio?.play('casing', { gain: 0.22, delay: 0.35 + Math.random() * 0.15, rate: def.id === 'pistol' ? 1.15 : 1 });
+      if (!def.anims.cycle) this.audio?.play(this.casingSound(), { gain: 0.22, delay: 0.35 + Math.random() * 0.15, rate: def.id === 'pistol' ? 1.15 : 1 });
     });
     ev.on('dryFire', () => {
-      if (!this.audio?.play('dry_fire', { gain: 0.9 })) this.audio?.click(undefined, 0.7);
+      if (!this.audio?.play('dry_fire')) this.audio?.click(undefined, 0.7);
     });
     ev.on('weaponSound', (e) => {
       if (e.sound === 'casing') {
-        this.audio?.play('casing', { gain: 0.25, delay: 0.4 });
+        this.audio?.play(this.casingSound(), { gain: 0.25, delay: 0.4 });
         return;
       }
-      const name = e.sound as SampleName;
-      if (!this.audio?.play(name, { gain: name === 'holster' ? 0.5 : 0.85, wet: 0.06 })) this.audio?.click(undefined, 0.9);
+      // Timeline events name a motion; the gun in hand may have its own recording of it
+      if (!this.audio?.foley(e.sound, this.weapons.weapon.def.id) && FALLBACK_CLICKS.has(e.sound)) this.audio?.click(undefined, 0.9);
     });
     ev.on('impact', (e) => {
       const p = vec(e.point);
       const n = vec(e.normal);
       this.effects.bulletHole(p, n);
       this.effects.dust(p, n);
-      this.audio?.impact(p);
+      // Walls and props are hard; the ground is whatever it is at that spot (dirt yard, asphalt road)
+      this.audio?.impact(p, e.surface === 'ground' ? surfaceAt(p) : 'hard');
     });
     ev.on('hit', (e) => {
       const p = vec(e.point);
@@ -172,7 +197,7 @@ export class Game {
       this.effects.blood(p, d, head || e.killed);
       this.splatterBehind(p, d, head ? 0.7 : 0.45);
       this.audio?.flesh(p);
-      this.audio?.hitMarker(head);
+      this.audio?.hitMarker(head, e.killed);
       this.hud.hit(head, e.killed);
       if (e.killed) this.hud.killFeed(CALLSIGNS[e.target % CALLSIGNS.length], head);
     });
@@ -193,6 +218,8 @@ export class Game {
       this.audio?.explosion(p);
       const d = p.distanceTo(this.player.position);
       this.shake = Math.max(this.shake, THREE.MathUtils.clamp(1.4 - d / 18, 0, 1));
+      // Close enough to hurt: ears shut for a moment
+      this.audio?.concuss(1 - d / 14);
     });
     ev.on('callout', (e) => this.debugCallout(e.shooter, e.kind));
   }
@@ -215,6 +242,11 @@ export class Game {
       this.audio.step(surfaceAt(this.player.position), undefined, loud);
       this.enemies.playerNoise(this.player.position, this.player.sprinting ? 20 : 11, 'step');
     };
+  }
+
+  /** Brass lands at the player's feet: it rings on the road, barely ticks in the dirt. */
+  private casingSound(): SampleName {
+    return surfaceAt(this.player.position) === 'dirt' ? 'casing_dirt' : 'casing_hard';
   }
 
   /** A loose magazine (or similar) tumbling onto the ground. */
@@ -268,7 +300,7 @@ export class Game {
       sun.shadow.map?.dispose();
       sun.shadow.map = null;
     }
-    this.scene.fog = new THREE.Fog(0xc9d3dc, 70, this.preset.fogFar);
+    this.scene.fog = makeFog();
     this.renderer.apply(this.preset);
   }
 
@@ -277,6 +309,7 @@ export class Game {
     this.enemies.clear();
     this.effects.clear();
     this.phys.clear();
+    this.loot.clear();
     this.hud.clearFeed();
     const sp = this.map.playerSpawns[Math.floor(Math.random() * this.map.playerSpawns.length)];
     this.player.spawn(sp, 0);
@@ -303,6 +336,9 @@ export class Game {
     this.enemies.clear();
     this.effects.clear();
     this.phys.clear();
+    this.loot.clear();
+    this.activeInteract = null;
+    this.hud.setInteractPrompt(null);
     this.mode = null;
     this.camera.position.set(-22, 9, 36);
     this.camera.lookAt(4, 1, -6);
@@ -433,6 +469,19 @@ export class Game {
     for (const s of shots) this.handleShot(s);
     if (this.state === 'playing') this.mode.update(this, dt);
     const aimDir = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+
+    // Loot query & interaction
+    if (this.player.alive) {
+      const cand = this.loot.queryInteract(this.player.eye, aimDir, this.weapons);
+      this.activeInteract = cand;
+      if (cand && (cmd.pressed & Btn.Interact) !== 0) {
+        this.loot.loot(cand, this.weapons, this.audio, this.events, this.hud);
+      }
+    } else {
+      this.activeInteract = null;
+    }
+    this.loot.tick(dt, this.player.position);
+
     const ctx = {
       time: this.time, player: this.player, playerAim: { origin: this.player.eye, dir: aimDir, ads: aiming },
       nav: this.nav, cover: this.cover, colliders: this.map.colliders, audio: this.audio, effects: this.effects,
@@ -500,7 +549,17 @@ export class Game {
       });
       this.hud.setScope(this.weapons.scoped, this.weapons.breath / 4);
       this.hud.grenades(this.enemies.grenades.positions, this.camera, this.player.position);
+      this.hud.setInteractPrompt(this.player.alive && this.activeInteract ? {
+        key: this.activeInteract.promptKey,
+        action: this.activeInteract.promptAction,
+        detail: this.activeInteract.promptDetail,
+      } : null);
       this.audio.updateListener(this.camera);
+      this.audio.setHealth(this.player.health / 100);
+      if (this.weapons.aiming !== this.wasAiming) {
+        this.wasAiming = this.weapons.aiming;
+        this.audio.ads(this.wasAiming);
+      }
       this.updateDebug();
 
       if (this.state === 'dead') {
@@ -519,6 +578,7 @@ export class Game {
     }
 
     this.effects.update(dt);
+    this.map.update(dt, this.camera.position);
     this.syncViewLighting();
     this.renderer.render(dt);
     this.input.endFrame();

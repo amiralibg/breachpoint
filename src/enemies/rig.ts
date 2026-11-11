@@ -42,6 +42,30 @@ const HITBOXES: [keyof Bones, keyof Bones, number, HitZone][] = [
   ['rUpLeg', 'rLeg', 0.09, 'leg'], ['rLeg', 'rFoot', 0.07, 'leg'],
 ];
 
+/**
+ * How a weapon is carried, in gun space (+Z along the barrel, origin at the model's own origin):
+ * where the wrists go, and where the gun sits relative to the neck when aimed.
+ */
+export interface Hold {
+  rGrip: [number, number, number];
+  lGrip: [number, number, number];
+  /** Aimed: gun origin from the neck as [right, up, forward]. */
+  aimed: [number, number, number];
+  /** Low ready: the same, with the muzzle dropped. */
+  low: [number, number, number];
+  /** Share of the body's bob and breathing the gun picks up (a pistol at arm's length moves most). */
+  sway: number;
+}
+
+export const HOLDS: Record<string, Hold> = {
+  // Stock in the shoulder, support hand under the handguard
+  m4: { rGrip: [-0.022, -0.05, -0.065], lGrip: [0.045, -0.04, 0.2], aimed: [0.1, -0.075, 0.3], low: [0.06, -0.32, 0.34], sway: 1 },
+  // Both hands on the grip, pushed out in front of the face
+  pistol: { rGrip: [-0.02, -0.035, -0.085], lGrip: [0.035, -0.05, -0.06], aimed: [0.03, -0.03, 0.5], low: [0.05, -0.4, 0.36], sway: 1.6 },
+  // A long rifle: the grip is half a metre behind the model's origin
+  sniper: { rGrip: [-0.022, -0.05, -0.5], lGrip: [0.04, -0.035, -0.08], aimed: [0.1, -0.085, 0.72], low: [0.06, -0.34, 0.7], sway: 0.7 },
+};
+
 function gunUpNow(pivot: THREE.Object3D): THREE.Vector3 {
   return new THREE.Vector3(0, 1, 0).applyQuaternion(pivot.getWorldQuaternion(new THREE.Quaternion()));
 }
@@ -80,12 +104,24 @@ export class SoldierRig {
   throwT = -1;
   private magDropped = false;
   onMagDrop: ((mag: THREE.Object3D, vel: THREE.Vector3) => void) | null = null;
+  onDropGun: ((pivot: THREE.Object3D, vel: THREE.Vector3, size: THREE.Vector3, center: THREE.Vector3) => void) | null = null;
   private recoil = 0;
   private flinch = new THREE.Vector3();
   private flinchVel = new THREE.Vector3();
   private stagger = new THREE.Vector3();
   private staggerVel = new THREE.Vector3();
   private legYaw = 0;
+  private hold: Hold;
+  /** Smoothed gun direction: the muzzle swings onto a target instead of snapping. */
+  private gunDir = new THREE.Vector3(0, 0, 1);
+  private prevVel = new THREE.Vector3();
+  private accel = new THREE.Vector3();
+  private stride = 0;
+  private breath = Math.random() * 10;
+  private headYaw = 0;
+  private headPitch = 0;
+  /** 0 = eyes front, 1 = head tracks `aimPoint` (set by the AI whenever it has something to look at). */
+  lookWeight = 0;
 
   dead = false;
   private ragdoll: Ragdoll | null = null;
@@ -94,7 +130,9 @@ export class SoldierRig {
   private boneVel = new Map<THREE.Bone, THREE.Vector3>();
   private lastDt = 1 / 60;
 
-  constructor(proto: CharacterProto, gun: THREE.Object3D, private scene: THREE.Scene, muzzleZ = 0.58, private phys: PhysicsWorld | null = null) {
+  constructor(proto: CharacterProto, gun: THREE.Object3D, private scene: THREE.Scene, muzzleZ = 0.58, private phys: PhysicsWorld | null = null,
+    hold: Hold = HOLDS.m4) {
+    this.hold = hold;
     this.model = SkeletonUtils.clone(proto.scene);
     this.model.rotation.y = facingAngle(this.model); // face +Z inside the rig
     this.tilt.add(this.model);
@@ -211,11 +249,15 @@ export class SoldierRig {
       // Legs give out: a small pull at the pelvis so bodies don't fall like planks
       this.ragdoll.impulse('pelvis', bulletDir.clone().setY(0).normalize().multiplyScalar(-force * 0.15).add(new THREE.Vector3(0, -2, 0)));
       const gunVel = bulletDir.clone().setY(0).normalize().multiplyScalar(1.2).add(new THREE.Vector3(0, 1.0, 0)).add(this.velocity);
-      this.phys.spawnProp(this.gunPivot, {
-        size: this.gunSize, center: this.gunCenter, vel: gunVel,
-        spin: new THREE.Vector3((Math.random() - 0.5) * 6, (Math.random() - 0.5) * 4, (Math.random() - 0.5) * 6),
-        density: 400, life: 12,
-      });
+      if (this.onDropGun) {
+        this.onDropGun(this.gunPivot, gunVel, this.gunSize, this.gunCenter);
+      } else {
+        this.phys.spawnProp(this.gunPivot, {
+          size: this.gunSize, center: this.gunCenter, vel: gunVel,
+          spin: new THREE.Vector3((Math.random() - 0.5) * 6, (Math.random() - 0.5) * 4, (Math.random() - 0.5) * 6),
+          density: 400, life: 12,
+        });
+      }
     }
   }
 
@@ -262,6 +304,18 @@ export class SoldierRig {
     this.staggerVel.multiplyScalar(Math.max(0, 1 - 10 * dt));
     this.stagger.addScaledVector(this.staggerVel, dt);
     this.tilt.position.copy(this.stagger).applyQuaternion(this.root.quaternion.clone().invert());
+    // Weight: lean into a run, and into changes of speed and direction (bank into a turn, rock back
+    // when stopping). Without this a body glides; with it, it has mass.
+    const invQ = this.root.quaternion.clone().invert();
+    const a = this.velocity.clone().sub(this.prevVel).divideScalar(this.lastDt).clampLength(0, 14);
+    this.prevVel.copy(this.velocity);
+    this.accel.lerp(a, 1 - Math.exp(-6 * dt));
+    const localV = this.velocity.clone().applyQuaternion(invQ);
+    const localA = this.accel.clone().applyQuaternion(invQ);
+    const leanX = THREE.MathUtils.clamp(localV.z * 0.022 + localA.z * 0.012, -0.12, 0.2);
+    const leanZ = THREE.MathUtils.clamp(-localV.x * 0.014 - localA.x * 0.012, -0.14, 0.14);
+    this.tilt.rotation.x = THREE.MathUtils.damp(this.tilt.rotation.x, leanX, 8, dt);
+    this.tilt.rotation.z = THREE.MathUtils.damp(this.tilt.rotation.z, leanZ, 8, dt);
     this.tilt.updateMatrixWorld(true);
 
     // Lower body toward the movement direction, upper body counter-rotates back to the aim
@@ -319,15 +373,50 @@ export class SoldierRig {
       rotateAxis(b.neck, axis, amt * 0.4);
     }
 
+    // --- Head: looks where the attention is, ahead of the body (eyes lead, shoulders follow)
+    {
+      const head = worldPos(b.head);
+      const to = new THREE.Vector3().subVectors(this.aimPoint, head);
+      const flat = Math.hypot(to.x, to.z);
+      let yaw = 0;
+      let pit = 0;
+      if (this.lookWeight > 0.01 && flat > 0.6) {
+        yaw = Math.atan2(to.x, to.z) - Math.atan2(fwd.x, fwd.z);
+        yaw = THREE.MathUtils.clamp(Math.atan2(Math.sin(yaw), Math.cos(yaw)), -1.1, 1.1) * this.lookWeight;
+        // The torso already pitches with the aim; the head makes up the rest
+        pit = THREE.MathUtils.clamp(Math.atan2(to.y, flat) - pitch * 0.7, -0.5, 0.5) * this.lookWeight;
+      }
+      this.headYaw = THREE.MathUtils.damp(this.headYaw, yaw, 9, dt);
+      this.headPitch = THREE.MathUtils.damp(this.headPitch, pit, 9, dt);
+      if (Math.abs(this.headYaw) > 1e-3 || Math.abs(this.headPitch) > 1e-3) {
+        rotateAxis(b.neck, up, this.headYaw * 0.45);
+        rotateAxis(b.head, up, this.headYaw * 0.55);
+        rotateAxis(b.head, right, -this.headPitch);
+      }
+    }
+
     // --- Rifle placement relative to the neck
     this.recoil = Math.max(0, this.recoil - dt * 10);
     const neck = worldPos(b.neck);
-    const aimedPos = neck.clone().addScaledVector(right, 0.1).addScaledVector(up, -0.075).addScaledVector(fwd, 0.3);
-    const lowPos = neck.clone().addScaledVector(right, 0.06).addScaledVector(up, -0.32).addScaledVector(fwd, 0.34);
-    const gunPos = lowPos.lerp(aimedPos, this.aim);
+    const h = this.hold;
+    const at = (o: [number, number, number]): THREE.Vector3 =>
+      neck.clone().addScaledVector(right, o[0]).addScaledVector(up, o[1]).addScaledVector(fwd, o[2]);
+    const gunPos = at(h.low).lerp(at(h.aimed), this.aim);
     const aimDir = toAim.normalize();
     const lowDir = fwd.clone().addScaledVector(up, -0.75).addScaledVector(right, -0.45).normalize();
-    const dir = lowDir.lerp(aimDir, this.aim).normalize();
+    const want = lowDir.lerp(aimDir, this.aim).normalize();
+    // The muzzle swings onto its target (heavier guns more slowly) and never points through the body
+    this.gunDir.lerp(want, 1 - Math.exp(-(h.sway > 1 ? 16 : 11) * dt)).normalize();
+    const dir = this.gunDir.clone();
+    // Carried weight: the gun rides the stride and the breath instead of being bolted to the neck
+    this.stride += dt * (speed > 0.3 ? 4 + speed * 1.6 : 0);
+    this.breath += dt;
+    const bob = Math.min(1, speed / 4) * (1 - this.aim * 0.6) * h.sway;
+    const calm = (1 - Math.min(1, speed / 2)) * h.sway;
+    gunPos.addScaledVector(up, Math.sin(this.stride * 2) * 0.012 * bob + Math.sin(this.breath * 1.7) * 0.004 * calm);
+    gunPos.addScaledVector(right, Math.sin(this.stride) * 0.01 * bob);
+    dir.addScaledVector(up, Math.sin(this.stride * 2 + 0.6) * 0.03 * bob + Math.sin(this.breath * 1.7 + 0.8) * 0.006 * calm);
+    dir.addScaledVector(right, Math.sin(this.breath * 0.9) * 0.008 * calm).normalize();
     gunPos.addScaledVector(dir, -this.recoil * 0.04);
     dir.addScaledVector(up, this.recoil * 0.08).normalize();
     // Reload: bring the rifle in and roll it so the mag well faces the left hand
@@ -342,7 +431,7 @@ export class SoldierRig {
     this.gunPivot.updateMatrixWorld(true);
 
     // --- Reload choreography for the left hand and the magazine
-    const guardGrip = this.gunPivot.localToWorld(new THREE.Vector3(0.045, -0.04, 0.2));
+    const guardGrip = this.gunPivot.localToWorld(new THREE.Vector3(...h.lGrip));
     let lGrip = guardGrip;
     let magOff = 0;
     if (r >= 0) {
@@ -385,7 +474,7 @@ export class SoldierRig {
     }
 
     // --- Arms onto the rifle (wrist targets slightly off the grip surfaces)
-    let rGrip = this.gunPivot.localToWorld(new THREE.Vector3(-0.022, -0.05, -0.065));
+    let rGrip = this.gunPivot.localToWorld(new THREE.Vector3(...h.rGrip));
     if (this.throwT >= 0) {
       // Overhand throw: wind up behind the head, release forward and high, back to the grip
       const tt = this.throwT;

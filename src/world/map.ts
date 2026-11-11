@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { loadHdri, loadModel, loadPbr, pbrMaterial } from '../core/assets';
+import { FOG_COLOR, installSunFog, makeSky } from './sky';
+import { loadModel, loadPbr, pbrMaterial } from '../core/assets';
 import type { QualityPreset } from '../core/settings';
 
 export interface WorldMap {
@@ -9,7 +10,12 @@ export interface WorldMap {
   playerSpawns: THREE.Vector3[];
   enemySpawns: THREE.Vector3[];
   sun: THREE.DirectionalLight;
+  /** Unit vector toward the sun. */
+  sunDir: THREE.Vector3;
+  sunColor: THREE.Color;
   envMap: THREE.Texture;
+  /** Per-frame: drifts the clouds and keeps the sky centred on the viewer. */
+  update(dt: number, viewer: THREE.Vector3): void;
   dispose(): void;
 }
 
@@ -52,18 +58,74 @@ function shadowed<T extends THREE.Object3D>(o: T): T {
   return o;
 }
 
-export async function buildMap(scene: THREE.Scene, q: QualityPreset): Promise<WorldMap> {
+/**
+ * Standing water on a ground material. Puddles sit where a slow noise over the world says the
+ * ground dips: inside one the surface goes flat, dark and mirror-smooth and picks up the sky; a
+ * damp margin around it is darker and a little glossier than the dry ground.
+ */
+function addPuddles(mat: THREE.MeshStandardMaterial, opts: { cover: number; scale: number }): void {
+  const uniforms = { uPudCover: { value: opts.cover }, uPudScale: { value: opts.scale } };
+  mat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, uniforms);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec2 vPudPos;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPudPos = (modelMatrix * vec4(transformed, 1.0)).xz;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', /* glsl */ `#include <common>
+        uniform float uPudCover, uPudScale;
+        varying vec2 vPudPos;
+        float pudWater, pudDamp;
+        float pudHash(vec2 p) {
+          vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+          p3 += dot(p3, p3.yzx + 33.33);
+          return fract((p3.x + p3.y) * p3.z);
+        }
+        float pudNoise(vec2 p) {
+          vec2 i = floor(p), f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(mix(pudHash(i), pudHash(i + vec2(1.0, 0.0)), f.x), mix(pudHash(i + vec2(0.0, 1.0)), pudHash(i + vec2(1.0, 1.0)), f.x), f.y);
+        }`)
+      .replace('#include <map_fragment>', /* glsl */ `#include <map_fragment>
+        {
+          vec2 q = vPudPos * uPudScale;
+          float n = pudNoise(q) * 0.55 + pudNoise(q * 2.3 + 11.0) * 0.3 + pudNoise(q * 6.1 + 3.0) * 0.15;
+          // The rough bits of the surface stand proud of the water: its own texture breaks the shoreline
+          float lum = dot(diffuseColor.rgb, vec3(0.333));
+          float level = n - (lum - 0.25) * 0.25;
+          float edge = 1.0 - uPudCover;
+          pudWater = smoothstep(edge, edge + 0.035, level);
+          pudDamp = smoothstep(edge - 0.16, edge, level);
+          diffuseColor.rgb *= mix(1.0, 0.62, pudDamp) * mix(1.0, 0.7, pudWater);
+        }`)
+      .replace('#include <roughnessmap_fragment>', /* glsl */ `#include <roughnessmap_fragment>
+        roughnessFactor = mix(roughnessFactor, roughnessFactor * 0.6, pudDamp);
+        roughnessFactor = mix(roughnessFactor, 0.045, pudWater);`)
+      .replace('#include <normal_fragment_maps>', /* glsl */ `#include <normal_fragment_maps>
+        normal = normalize(mix(normal, nonPerturbedNormal, pudWater * 0.97));`);
+  };
+  mat.customProgramCacheKey = () => 'puddles-1';
+}
+
+/** Late-afternoon haze: thin up close, closes the far end of the compound. */
+export function makeFog(): THREE.FogExp2 {
+  return new THREE.FogExp2(FOG_COLOR, 0.0085);
+}
+
+/** Low sun, about 15 degrees up, ahead and to the left of the player's spawn. */
+const SUN_DIR = new THREE.Vector3(-0.56, 0.27, -0.8).normalize();
+const SUN_COLOR = new THREE.Color(1.0, 0.68, 0.4);
+
+export async function buildMap(scene: THREE.Scene, q: QualityPreset, gl: THREE.WebGLRenderer): Promise<WorldMap> {
   const root = new THREE.Group();
   root.name = 'map';
   const colliders: THREE.Box3[] = [];
 
-  const [sand, asphalt, sandstone, concrete, iron, hdri] = await Promise.all([
+  const [sand, asphalt, sandstone, concrete, iron] = await Promise.all([
     loadPbr('coast_sand_rocks_02', q.textureRes, q.anisotropy),
     loadPbr('asphalt_02', q.textureRes, q.anisotropy),
     loadPbr('sandstone_brick_wall_01', q.textureRes, q.anisotropy),
     loadPbr('concrete_wall_008', q.textureRes, q.anisotropy),
     loadPbr('corrugated_iron', q.textureRes, q.anisotropy),
-    loadHdri('kloofendal_48d_partly_cloudy_puresky', q.hdriRes),
   ]);
 
   const mats = {
@@ -75,32 +137,52 @@ export async function buildMap(scene: THREE.Scene, q: QualityPreset): Promise<Wo
   };
   mats.asphalt.polygonOffset = true;
   mats.asphalt.polygonOffsetFactor = -2;
+  // Hosed-down road: the low sun streaks along it
+  mats.asphalt.roughness = 0.62;
+  // Water lies in the road's dips and, more sparsely, in the hard-packed yard
+  addPuddles(mats.asphalt, { cover: 0.42, scale: 0.42 });
+  addPuddles(mats.sand, { cover: 0.3, scale: 0.16 });
 
   // --- Sky & lighting -------------------------------------------------------
-  scene.background = hdri;
-  scene.environment = hdri;
-  scene.environmentIntensity = 0.45;
-  scene.backgroundIntensity = 1;
-  scene.fog = new THREE.Fog(0xc9d3dc, 70, q.fogFar);
+  installSunFog(SUN_DIR, new THREE.Color(1.0, 0.6, 0.32));
+  const sky = makeSky(SUN_DIR);
+  root.add(sky);
+  // Reflections come from the same sky, without the sun disc (the sun light supplies that highlight)
+  const envSky = makeSky(SUN_DIR, false);
+  const envScene = new THREE.Scene();
+  envScene.add(envSky);
+  const pmrem = new THREE.PMREMGenerator(gl);
+  const envTarget = pmrem.fromScene(envScene, 0, 0.1, 1000);
+  pmrem.dispose();
+  envSky.material.dispose();
+  envSky.geometry.dispose();
+  const envMap = envTarget.texture;
 
-  const sun = new THREE.DirectionalLight(0xfff1dc, 4.5);
-  sun.position.set(-38, 60, 26);
+  scene.background = null;
+  scene.environment = envMap;
+  scene.environmentIntensity = 1;
+  scene.fog = makeFog();
+
+  const sun = new THREE.DirectionalLight(SUN_COLOR, 6.5);
+  sun.position.copy(SUN_DIR).multiplyScalar(110);
   sun.target.position.set(0, 0, 0);
   sun.castShadow = q.shadows;
   sun.shadow.mapSize.set(q.shadowMapSize, q.shadowMapSize);
   const sc = sun.shadow.camera;
-  sc.left = -HALF - 6;
-  sc.right = HALF + 6;
-  sc.top = HALF + 6;
-  sc.bottom = -HALF - 6;
+  // Seen from a low sun the compound is wide and shallow
+  sc.left = -HALF * 1.5;
+  sc.right = HALF * 1.5;
+  sc.top = 26;
+  sc.bottom = -16;
   sc.near = 1;
-  sc.far = 160;
+  sc.far = 230;
   sc.updateProjectionMatrix();
-  sun.shadow.bias = -0.0004;
-  sun.shadow.normalBias = 0.03;
+  sun.shadow.bias = -0.0005;
+  sun.shadow.normalBias = 0.05;
   sun.shadow.radius = q.softShadows ? 2.5 : 1;
   root.add(sun, sun.target);
-  root.add(new THREE.HemisphereLight(0xbfd4ff, 0x8a7458, 0.15));
+  // Skylight from the cool side of the sky, warm bounce off the yard
+  root.add(new THREE.HemisphereLight(0x8fa6cf, 0x5a4636, 0.55));
 
   // --- Ground ---------------------------------------------------------------
   const groundSize = 220;
@@ -257,7 +339,13 @@ export async function buildMap(scene: THREE.Scene, q: QualityPreset): Promise<Wo
     colliders,
     bounds,
     sun,
-    envMap: hdri,
+    sunDir: SUN_DIR.clone(),
+    sunColor: SUN_COLOR.clone(),
+    envMap,
+    update(dt, viewer) {
+      sky.material.uniforms.uTime.value += dt;
+      sky.position.copy(viewer);
+    },
     playerSpawns: [new THREE.Vector3(0, 0, 33), new THREE.Vector3(-8, 0, 32), new THREE.Vector3(8, 0, 33)],
     enemySpawns: [
       new THREE.Vector3(0, 0, -36), new THREE.Vector3(-14, 0, -36), new THREE.Vector3(12, 0, -36),
@@ -272,6 +360,8 @@ export async function buildMap(scene: THREE.Scene, q: QualityPreset): Promise<Wo
         if (m.isMesh && m.geometry && !(m.geometry as THREE.BufferGeometry).userData.shared) m.geometry.dispose();
       });
       Object.values(mats).forEach((m) => m.dispose());
+      sky.material.dispose();
+      envTarget.dispose();
     },
   };
 }

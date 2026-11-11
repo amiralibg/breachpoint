@@ -110,6 +110,7 @@
           <tr><td><kbd>Mouse</kbd></td><td>Look</td></tr>
           <tr><td><kbd>LMB</kbd></td><td>Fire</td></tr>
           <tr><td><kbd>RMB</kbd></td><td>Aim down sights (hold)</td></tr>
+          <tr><td><kbd>E</kbd></td><td>Loot weapon / scavenge ammo</td></tr>
           <tr><td><kbd>R</kbd></td><td>Reload (tactical keeps the mag, empty racks the bolt)</td></tr>
           <tr><td><kbd>F</kbd></td><td>Inspect weapon</td></tr>
           <tr><td><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>Q</kbd> <kbd>Wheel</kbd></td><td>M4 / Pistol / Sniper</td></tr>
@@ -128,6 +129,14 @@
 
     <!-- HUD -->
     <div id="hud" class="hidden">
+      <div id="hud-interact" class="hidden">
+        <kbd class="interact-key">E</kbd>
+        <div class="interact-text">
+          <div class="interact-action">LOOT WEAPON</div>
+          <div class="interact-detail">+30 AMMO</div>
+        </div>
+      </div>
+      <div id="hud-toasts"></div>
       <div id="scope" class="hidden">
         <div class="scope-glass"></div>
         <svg class="reticle" viewBox="-500 -500 1000 1000" preserveAspectRatio="xMidYMid meet">

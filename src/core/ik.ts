@@ -58,8 +58,17 @@ export function twoBoneIK(
   const C = worldPos(c);
   const lab = A.distanceTo(B);
   const lbc = B.distanceTo(C);
+  const maxLen = lab + lbc;
   const toT = new THREE.Vector3().subVectors(target, A);
-  const d = THREE.MathUtils.clamp(toT.length(), 0.05, (lab + lbc) * 0.999);
+  const rawDist = toT.length();
+  // Soft IK: smooth asymptotic compression near max reach prevents sudden elbow pops
+  const da = 0.04 * maxLen;
+  const dSoft = maxLen - da;
+  let d = rawDist;
+  if (rawDist > dSoft) {
+    d = maxLen - da * Math.exp(-(rawDist - dSoft) / da);
+  }
+  d = THREE.MathUtils.clamp(d, 0.05, maxLen * 0.999);
   const dir = toT.normalize();
   const poleDir = new THREE.Vector3().subVectors(pole, A);
   poleDir.addScaledVector(dir, -poleDir.dot(dir)).normalize();
@@ -72,35 +81,224 @@ export function twoBoneIK(
   aimBone(b, c, end);
 }
 
-/**
- * A hand's local finger and back-of-hand directions, measured once from the rig.
- * Mixamo hands: back = -(index - pinky) x (hand -> middle) for the right hand, + for the left.
- */
-export interface HandFrame {
-  hand: THREE.Bone;
-  fwdLocal: THREE.Vector3;
-  backLocal: THREE.Vector3;
-  fingers: THREE.Bone[][];
-  thumb: THREE.Bone[];
+export function findBone(root: THREE.Object3D, name: string): THREE.Bone | null {
+  return (
+    (root.getObjectByName(`mixamorig${name}`) as THREE.Bone) ??
+    (root.getObjectByName(`mixamorig:${name}`) as THREE.Bone) ??
+    (root.getObjectByName(name) as THREE.Bone) ??
+    null
+  );
 }
 
+// ---------------------------------------------------------------------------------------------
+// Hands
+//
+// Nothing here assumes the rig's local axes: flexion axes, finger thickness and the palm's
+// contact points are all measured from the bind pose and the skin, so another hand model with
+// Mixamo-style bone names works without retuning.
+
+/** One finger joint: a bone that flexes about `axis`, with a skin capsule reaching to `tip`. */
+export interface FingerJoint {
+  bone: THREE.Bone;
+  rest: THREE.Quaternion;
+  /** Flexion axis in the bone's local frame; positive angles curl toward the palm. */
+  axis: THREE.Vector3;
+  /** End of this segment (the next joint, or the fingertip) in the bone's local frame. */
+  tip: THREE.Vector3;
+  /** Skin radius around the bone, world units. */
+  radius: number;
+}
+
+export interface HandFrame {
+  side: 'Left' | 'Right';
+  hand: THREE.Bone;
+  /** Wrist -> middle knuckle, and the back-of-hand normal, in the hand bone's local frame. */
+  fwdLocal: THREE.Vector3;
+  backLocal: THREE.Vector3;
+  /** Index, middle, ring, pinky: three joints each. */
+  fingers: FingerJoint[][];
+  thumb: FingerJoint[];
+  /** Axis (thumb base local) that swings the thumb in front of the palm. */
+  thumbSwing: THREE.Vector3;
+  /** Axis (thumb base local) that lays the thumb alongside the index finger. */
+  thumbAdduct: THREE.Vector3;
+  /** Spheres on the palm skin, in the hand bone's local frame (radius in world units). */
+  palm: { p: THREE.Vector3; r: number }[];
+  /** Every finger joint in a fixed order (fingers then thumb): the layout of a finger pose. */
+  joints: FingerJoint[];
+}
+
+/** Flexion limits per joint (knuckle, middle, distal), radians. */
+export const FINGER_LIMITS = [1.45, 1.75, 1.15];
+export const THUMB_LIMITS = [0.55, 0.95, 1.2];
+export const THUMB_SWING_MAX = 1.25;
+export const THUMB_ADDUCT_MAX = 0.75;
+
+const FINGER_NAMES = ['Index', 'Middle', 'Ring', 'Pinky'];
+/** Finger and palm half-thickness as a share of the palm's length (wrist to middle knuckle). */
+const FINGER_RADII = [0.095, 0.098, 0.092, 0.082];
+const PALM_RADIUS = 0.145;
+
 export function measureHand(root: THREE.Object3D, side: 'Left' | 'Right'): HandFrame {
-  const get = (n: string): THREE.Bone => root.getObjectByName(`mixamorig${side}${n}`) as THREE.Bone;
-  const hand = get('Hand');
+  const get = (n: string): THREE.Bone => {
+    const b = findBone(root, `${side}${n}`);
+    if (!b) throw new Error(`Bone mixamorig${side}${n} not found`);
+    return b;
+  };
   root.updateMatrixWorld(true);
+  const hand = get('Hand');
+  // Thickness scales with the hand itself, not with whatever scale the rig was exported at
+  const worldScale = worldPos(get('HandMiddle1')).distanceTo(worldPos(hand));
   const h = worldPos(hand);
   const mid = worldPos(get('HandMiddle1')).sub(h).normalize();
-  const across = worldPos(get('HandIndex1')).sub(worldPos(get('HandPinky1')));
-  const back = new THREE.Vector3().crossVectors(across, mid).multiplyScalar(side === 'Right' ? -1 : 1).normalize();
-  const inv = hand.getWorldQuaternion(new THREE.Quaternion()).invert();
-  const chain = (f: string): THREE.Bone[] => [1, 2, 3].map((i) => get(`Hand${f}${i}`)).filter(Boolean);
-  return {
-    hand,
-    fwdLocal: mid.applyQuaternion(inv),
-    backLocal: back.applyQuaternion(inv),
-    fingers: ['Index', 'Middle', 'Ring', 'Pinky'].map(chain),
-    thumb: chain('Thumb'),
+  const across = worldPos(get('HandPinky1')).sub(worldPos(get('HandIndex1'))); // toward the little finger
+  const back = new THREE.Vector3().crossVectors(across, mid).multiplyScalar(side === 'Right' ? 1 : -1).normalize();
+  const palmDir = back.clone().negate();
+  const ulnar = across.clone().normalize();
+  const invHand = hand.getWorldQuaternion(new THREE.Quaternion()).invert();
+
+  const chain = (name: string, radius: number, closeDir: (at: THREE.Vector3) => THREE.Vector3, useHinge = true): FingerJoint[] => {
+    const bones = [1, 2, 3]
+      .map((i) => findBone(root, `${side}Hand${name}${i}`))
+      .filter((b): b is THREE.Bone => b !== null);
+    const pts = bones.map((b) => worldPos(b));
+    // The rig's end bones are unreliable (some exports park them at the origin); extend the last segment.
+    if (pts.length >= 2) {
+      const n = pts.length;
+      pts.push(pts[n - 1].clone().add(pts[n - 1].clone().sub(pts[n - 2]).multiplyScalar(0.85)));
+    }
+    // A finger modelled slightly curled shows its own hinge: the axis its first two bones already
+    // bend about. Used when it agrees with the palm (a digit resting bent backward does not).
+    const hinge = new THREE.Vector3();
+    if (bones.length >= 3) {
+      hinge.crossVectors(pts[1].clone().sub(pts[0]).normalize(), pts[2].clone().sub(pts[1]).normalize());
+    }
+    const bent = useHinge && hinge.length() > 0.07; // more than ~4 degrees of bend at rest
+    hinge.normalize();
+    return bones.map((bone, j) => {
+      const dir = pts[j + 1].clone().sub(pts[j]).normalize();
+      const close = closeDir(pts[j]);
+      close.addScaledVector(dir, -close.dot(dir)).normalize();
+      const inv = bone.getWorldQuaternion(new THREE.Quaternion()).invert();
+      const guess = new THREE.Vector3().crossVectors(dir, close).normalize();
+      // Keep the hinge square to this bone, so flexing never twists it
+      const own = hinge.clone().addScaledVector(dir, -hinge.dot(dir)).normalize();
+      return {
+        bone,
+        rest: bone.quaternion.clone(),
+        axis: (bent && own.dot(guess) > 0.5 ? own : guess).applyQuaternion(inv),
+        tip: bone.worldToLocal(pts[j + 1].clone()),
+        radius: radius * worldScale * (1 - j * 0.09),
+      };
+    });
   };
+
+  const fingers = FINGER_NAMES.map((n, i) => chain(n, FINGER_RADII[i], () => palmDir.clone()));
+  // The thumb closes across the palm: each joint bends toward the base of the little finger, and
+  // a little into the palm. Its hinge can't be read from the rest pose (thumbs are often modelled
+  // bent slightly backward), so it is built from where a thumb goes when it closes.
+  const pinkyBase = fingers[3].length ? worldPos(fingers[3][0].bone) : h.clone().add(ulnar);
+  const thumb = chain(
+    'Thumb', 0.112,
+    (at) => pinkyBase.clone().sub(at).normalize().addScaledVector(palmDir, 0.45), false);
+  const thumbSwing = new THREE.Vector3();
+  const thumbAdduct = new THREE.Vector3(1, 0, 0);
+  if (thumb.length) {
+    const t0 = worldPos(thumb[0].bone);
+    const tDir = thumb[0].bone.localToWorld(thumb[0].tip.clone()).sub(t0).normalize();
+    // Swing about the hand's long axis, signed so a positive angle carries the thumb palm-ward.
+    const axis = mid.clone();
+    if (new THREE.Vector3().crossVectors(axis, tDir).dot(palmDir) < 0) axis.negate();
+    const inv = thumb[0].bone.getWorldQuaternion(new THREE.Quaternion()).invert();
+    thumbSwing.copy(axis).applyQuaternion(inv);
+    // Adduction turns in the plane of the palm, signed to bring the thumb toward the fingers.
+    const flat = palmDir.clone();
+    if (new THREE.Vector3().crossVectors(flat, tDir).dot(mid) < 0) flat.negate();
+    thumbAdduct.copy(flat).applyQuaternion(inv);
+  }
+
+  // Palm: spheres from the heel of the hand to each knuckle, sunk so their skin side is the palm.
+  const palmR = PALM_RADIUS * worldScale;
+  const palm: { p: THREE.Vector3; r: number }[] = [];
+  for (const f of fingers) {
+    if (!f.length) continue;
+    const k = worldPos(f[0].bone);
+    for (const t of [0.4, 0.7, 1]) palm.push({ p: hand.worldToLocal(h.clone().lerp(k, t)), r: palmR });
+  }
+
+  return {
+    side,
+    hand,
+    fwdLocal: mid.clone().applyQuaternion(invHand),
+    backLocal: back.clone().applyQuaternion(invHand),
+    fingers,
+    thumb,
+    thumbSwing,
+    thumbAdduct,
+    palm,
+    joints: [...fingers.flat(), ...thumb],
+  };
+}
+
+/**
+ * Replace the default finger and palm thickness with what the skin actually measures: for every
+ * vertex mostly driven by a finger bone, its distance from that bone's segment.
+ */
+export function measureSkin(root: THREE.Object3D, hands: HandFrame[]): void {
+  const byBone = new Map<THREE.Bone, { joint: FingerJoint; a: THREE.Vector3; b: THREE.Vector3; d: number[] }>();
+  const palms = new Map<THREE.Bone, { hand: HandFrame; o: THREE.Vector3; n: THREE.Vector3; d: number[] }>();
+  root.updateMatrixWorld(true);
+  for (const hf of hands) {
+    for (const j of hf.joints) {
+      byBone.set(j.bone, { joint: j, a: worldPos(j.bone), b: j.bone.localToWorld(j.tip.clone()), d: [] });
+    }
+    const q = hf.hand.getWorldQuaternion(new THREE.Quaternion());
+    palms.set(hf.hand, { hand: hf, o: worldPos(hf.hand), n: hf.backLocal.clone().applyQuaternion(q), d: [] });
+  }
+  const v = new THREE.Vector3();
+  const seg = new THREE.Line3();
+  const cp = new THREE.Vector3();
+  root.traverse((o) => {
+    const m = o as THREE.SkinnedMesh;
+    if (!m.isSkinnedMesh) return;
+    const idx = m.geometry.getAttribute('skinIndex');
+    const wgt = m.geometry.getAttribute('skinWeight');
+    const pos = m.geometry.getAttribute('position');
+    if (!idx || !wgt) return;
+    for (let i = 0; i < pos.count; i++) {
+      let best = 0;
+      let bw = -1;
+      for (let k = 0; k < 4; k++) {
+        const w = wgt.getComponent(i, k);
+        if (w > bw) {
+          bw = w;
+          best = idx.getComponent(i, k);
+        }
+      }
+      if (bw < 0.55) continue;
+      const bone = m.skeleton.bones[best];
+      const f = byBone.get(bone);
+      const p = palms.get(bone);
+      if (!f && !p) continue;
+      m.getVertexPosition(i, v).applyMatrix4(m.matrixWorld);
+      if (f) f.d.push(seg.set(f.a, f.b).closestPointToPoint(v, true, cp).distanceTo(v));
+      else if (p) {
+        // Palm side only: the back of the hand never touches the gun
+        const side = -v.sub(p.o).dot(p.n);
+        if (side > 0) p.d.push(side);
+      }
+    }
+  });
+  const pct = (d: number[], q: number): number => d.sort((x, y) => x - y)[Math.floor((d.length - 1) * q)];
+  for (const f of byBone.values()) {
+    // Low-poly fingers are boxy: the corners overstate the thickness, so lean toward the faces
+    if (f.d.length >= 6) f.joint.radius = THREE.MathUtils.clamp(pct(f.d, 0.5), f.joint.radius * 0.85, f.joint.radius * 1.35);
+  }
+  for (const p of palms.values()) {
+    if (p.d.length < 12) continue;
+    const r = THREE.MathUtils.clamp(pct(p.d, 0.6), p.hand.palm[0].r * 0.85, p.hand.palm[0].r * 1.4);
+    for (const s of p.hand.palm) s.r = r;
+  }
 }
 
 function basis(f: THREE.Vector3, b: THREE.Vector3, out: THREE.Matrix4): THREE.Matrix4 {
@@ -110,125 +308,48 @@ function basis(f: THREE.Vector3, b: THREE.Vector3, out: THREE.Matrix4): THREE.Ma
   return out.makeBasis(x, y, z);
 }
 
-/** Turn the hand so its fingers point along `fwd` and the back of the hand faces `back` (world). */
-export function orientHand(h: HandFrame, fwd: THREE.Vector3, back: THREE.Vector3, weight = 1): void {
+/** World rotation that points the hand's fingers along `fwd` with its back facing `back`. */
+export function handQuat(h: HandFrame, fwd: THREE.Vector3, back: THREE.Vector3, out = new THREE.Quaternion()): THREE.Quaternion {
   basis(fwd, back, _m1);
   basis(h.fwdLocal, h.backLocal, _m2);
-  const q = new THREE.Quaternion().setFromRotationMatrix(_m1.multiply(_m2.transpose()));
-  if (weight < 1) q.slerp(h.hand.getWorldQuaternion(new THREE.Quaternion()), 1 - weight);
-  setWorldQuat(h.hand, q);
+  return out.setFromRotationMatrix(_m1.multiply(_m2.transpose()));
 }
 
-/** Curl the fingers toward the palm (0 = flat, 1 = fist). */
-export function curlFingers(h: HandFrame, curl: number): void {
-  const hq = h.hand.getWorldQuaternion(new THREE.Quaternion());
-  const fwd = h.fwdLocal.clone().applyQuaternion(hq);
-  const back = h.backLocal.clone().applyQuaternion(hq);
-  const axis = new THREE.Vector3().crossVectors(back, fwd).normalize();
-  const per = [0.85, 1.25, 0.9];
-  for (const chain of h.fingers) {
-    chain.forEach((b, i) => rotateAxis(b, axis, curl * per[i]));
-  }
-  // The thumb wraps across the palm
-  const thumbAxis = fwd.clone().addScaledVector(axis, 0.3).normalize();
-  h.thumb.forEach((b, i) => rotateAxis(b, thumbAxis, curl * (i === 0 ? 0.25 : 0.45) * (h.hand.name.includes('Right') ? 1 : -1)));
+/** Flex one joint from its rest pose. */
+export function flexJoint(j: FingerJoint, angle: number): void {
+  j.bone.quaternion.copy(j.rest).multiply(_q.setFromAxisAngle(j.axis, angle));
 }
 
-/** Capsule in world space (a hand collider proxy). */
-export interface Capsule {
-  a: THREE.Vector3;
-  b: THREE.Vector3;
-  r: number;
-  hand?: 'l' | 'r';
+/** Thumb base: swing in front of the palm, lay it toward the fingers, then flex. */
+export function poseThumbBase(h: HandFrame, swing: number, flex: number, adduct = 0): void {
+  const j = h.thumb[0];
+  if (!j) return;
+  j.bone.quaternion.copy(j.rest)
+    .multiply(_q.setFromAxisAngle(h.thumbSwing, swing))
+    .multiply(_q2.setFromAxisAngle(h.thumbAdduct, adduct))
+    .multiply(_q.setFromAxisAngle(j.axis, flex));
 }
 
-const _cp = new THREE.Vector3();
-const _ab = new THREE.Vector3();
-
-/** Penetration depth of point p (with radius pad) into the capsule, and the outward normal. */
-export function capsulePenetration(c: Capsule, p: THREE.Vector3, pad: number, outNormal?: THREE.Vector3): number {
-  _ab.subVectors(c.b, c.a);
-  const t = THREE.MathUtils.clamp(_cp.subVectors(p, c.a).dot(_ab) / Math.max(1e-9, _ab.lengthSq()), 0, 1);
-  _cp.copy(c.a).addScaledVector(_ab, t);
-  const d = p.distanceTo(_cp);
-  if (outNormal) outNormal.subVectors(p, _cp).divideScalar(Math.max(1e-6, d));
-  return c.r + pad - d;
+/** A relaxed or clenched hand with no contact: `curl` 0 = flat, 1 = fist. */
+export function curlHand(h: HandFrame, curl: number): void {
+  for (const f of h.fingers) f.forEach((j, k) => flexJoint(j, curl * FINGER_LIMITS[k]));
+  poseThumbBase(h, curl * THUMB_SWING_MAX * 0.6, curl * THUMB_LIMITS[0]);
+  for (let k = 1; k < h.thumb.length; k++) flexJoint(h.thumb[k], curl * THUMB_LIMITS[k]);
 }
 
-function anyInside(points: THREE.Vector3[], caps: Capsule[], pad: number): boolean {
-  for (const p of points) for (const c of caps) if (capsulePenetration(c, p, pad) > 0) return true;
-  return false;
-}
-
-function chainPoints(chain: THREE.Bone[], from: number): THREE.Vector3[] {
-  const pts: THREE.Vector3[] = [];
-  for (let k = from + 1; k < chain.length; k++) pts.push(worldPos(chain[k]));
-  const n = chain.length;
-  if (n >= 2) {
-    const last = worldPos(chain[n - 1]);
-    const prev = worldPos(chain[n - 2]);
-    pts.push(last.clone().add(last.clone().sub(prev).multiplyScalar(0.8))); // fingertip
-  }
-  return pts;
-}
-
-/**
- * Curl each finger joint by joint toward the palm until it touches one of the capsules
- * (up to `curl`), so fingers wrap around grips and handguards instead of sinking into them.
- * A finger that starts inside keeps curling until it comes out and touches again.
- */
-export function curlFingersContact(h: HandFrame, curl: number, caps: Capsule[]): void {
-  const hq = h.hand.getWorldQuaternion(new THREE.Quaternion());
-  const fwd = h.fwdLocal.clone().applyQuaternion(hq);
-  const back = h.backLocal.clone().applyQuaternion(hq);
-  const axis = new THREE.Vector3().crossVectors(back, fwd).normalize();
-  const thumbAxis = fwd.clone().addScaledVector(axis, 0.3).normalize().multiplyScalar(h.hand.name.includes('Right') ? 1 : -1);
-  const pad = 0.008;
-  // Thumb: lay it forward along the grip, angled toward the palm, instead of sticking up
-  if (h.thumb.length >= 2) {
-    const t0 = worldPos(h.thumb[0]);
-    const dir = fwd.clone().multiplyScalar(0.8).addScaledVector(back, -0.55).normalize();
-    aimBone(h.thumb[0], h.thumb[1], t0.addScaledVector(dir, 0.05), Math.min(1, curl));
-  }
-  const chains: [THREE.Bone[], THREE.Vector3, number[]][] = [
-    ...h.fingers.map((f) => [f, axis, [0.85, 1.25, 0.9]] as [THREE.Bone[], THREE.Vector3, number[]]),
-    [h.thumb.slice(1), thumbAxis, [0.35, 0.35]],
-  ];
-  for (const [chain, ax, per] of chains) {
-    for (let j = 0; j < chain.length; j++) {
-      const steps = 8;
-      const step = (curl * per[j]) / steps;
-      let wasInside = anyInside(chainPoints(chain, j), caps, pad);
-      for (let s = 0; s < steps; s++) {
-        rotateAxis(chain[j], ax, step);
-        const inside = anyInside(chainPoints(chain, j), caps, pad);
-        if (inside && !wasInside) {
-          rotateAxis(chain[j], ax, -step); // touched: back off one step and stop this joint
-          break;
-        }
-        wasInside = inside;
-      }
+/** Skin spheres along a chain from joint `from` outward, in world space. */
+export function chainSpheres(
+  chain: FingerJoint[], from: number, out: { p: THREE.Vector3; r: number }[] = [],
+): { p: THREE.Vector3; r: number }[] {
+  for (let k = from; k < chain.length; k++) {
+    const j = chain[k];
+    const a = worldPos(j.bone);
+    const b = j.bone.localToWorld(j.tip.clone());
+    const next = chain[k + 1]?.radius ?? j.radius * 0.88;
+    // The joint itself belongs to the previous segment, except at the knuckle.
+    for (const t of k === from ? [0.3, 0.55, 0.8, 1] : [0.25, 0.5, 0.75, 1]) {
+      out.push({ p: a.clone().lerp(b, t), r: THREE.MathUtils.lerp(j.radius, next, t) });
     }
   }
-}
-
-/** How far the palm sinks into the capsules (max over a few palm points) and which way is out. */
-export function palmPenetration(h: HandFrame, caps: Capsule[], outNormal: THREE.Vector3): number {
-  const wrist = worldPos(h.hand);
-  const knuckles = worldPos(h.fingers[1][0]);
-  const idx = worldPos(h.fingers[0][0]);
-  const pinky = worldPos(h.fingers[3][0]);
-  const pts = [wrist.clone().lerp(knuckles, 0.25), wrist.clone().lerp(knuckles, 0.6), knuckles, idx, pinky];
-  let best = 0;
-  const n = new THREE.Vector3();
-  for (const p of pts) {
-    for (const c of caps) {
-      const d = capsulePenetration(c, p, 0.013, n);
-      if (d > best) {
-        best = d;
-        outNormal.copy(n);
-      }
-    }
-  }
-  return best;
+  return out;
 }

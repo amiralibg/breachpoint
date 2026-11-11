@@ -13,6 +13,14 @@ export interface QualityPreset {
   anisotropy: number;
   ambientOcclusion: boolean;
   bloom: boolean;
+  /** Light shafts around the sun. */
+  sunShafts: boolean;
+  /** Steps of the shadowed haze march per pixel (0 = off; needs shadows, else sunShafts stands in). */
+  volumetrics: number;
+  /** The exposure follows how bright the view is. */
+  autoExposure: boolean;
+  /** Final colour grade, vignette and film grain. */
+  grade: boolean;
   antialias: 'none' | 'fxaa' | 'smaa';
   /** Max bullet decals kept in the world. */
   decals: number;
@@ -33,6 +41,10 @@ export const QUALITY_PRESETS: Record<QualityLevel, QualityPreset> = {
     anisotropy: 1,
     ambientOcclusion: false,
     bloom: false,
+    sunShafts: false,
+    volumetrics: 0,
+    autoExposure: false,
+    grade: true,
     antialias: 'none',
     decals: 24,
     fogFar: 140,
@@ -48,7 +60,11 @@ export const QUALITY_PRESETS: Record<QualityLevel, QualityPreset> = {
     hdriRes: '1k',
     anisotropy: 4,
     ambientOcclusion: false,
-    bloom: false,
+    bloom: true,
+    sunShafts: true,
+    volumetrics: 10,
+    autoExposure: true,
+    grade: true,
     antialias: 'fxaa',
     decals: 48,
     fogFar: 180,
@@ -65,6 +81,10 @@ export const QUALITY_PRESETS: Record<QualityLevel, QualityPreset> = {
     anisotropy: 8,
     ambientOcclusion: true,
     bloom: true,
+    sunShafts: true,
+    volumetrics: 16,
+    autoExposure: true,
+    grade: true,
     antialias: 'smaa',
     decals: 96,
     fogFar: 240,
@@ -81,6 +101,10 @@ export const QUALITY_PRESETS: Record<QualityLevel, QualityPreset> = {
     anisotropy: 16,
     ambientOcclusion: true,
     bloom: true,
+    sunShafts: true,
+    volumetrics: 24,
+    autoExposure: true,
+    grade: true,
     antialias: 'smaa',
     decals: 160,
     fogFar: 320,

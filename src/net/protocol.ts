@@ -21,6 +21,7 @@ export const Btn = {
   Inspect: 1 << 6,
   NextWeapon: 1 << 7,
   PrevWeapon: 1 << 8,
+  Interact: 1 << 9,
 } as const;
 
 /** Everything a player did during one tick. Small and serializable: this is what a client sends. */
@@ -59,7 +60,8 @@ export type GameEvent =
   | { type: 'explosion'; point: Vec3; radius: number }
   | { type: 'callout'; shooter: number; kind: Callout; at: Vec3 }
   | { type: 'spawn'; id: number; kind: 'enemy' | 'player'; at: Vec3 }
-  | { type: 'death'; id: number; kind: 'enemy' | 'player' };
+  | { type: 'death'; id: number; kind: 'enemy' | 'player' }
+  | { type: 'lootPickup'; kind: 'weapon' | 'ammo'; weapon: string; amount: number; at: Vec3 };
 
 export type HitZone = 'head' | 'torso' | 'arm' | 'leg';
 export type Callout = 'contact' | 'reloading' | 'flanking' | 'grenade' | 'manDown' | 'lostHim' | 'suppressing';

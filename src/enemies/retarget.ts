@@ -14,8 +14,8 @@ import * as THREE from 'three';
 /** Rotation about Y that makes the character face +Z (derived from the hip joints). */
 export function facingAngle(model: THREE.Object3D): number {
   model.updateMatrixWorld(true);
-  const l = model.getObjectByName('mixamorigLeftUpLeg');
-  const r = model.getObjectByName('mixamorigRightUpLeg');
+  const l = model.getObjectByName('mixamorigLeftUpLeg') ?? model.getObjectByName('mixamorig:LeftUpLeg');
+  const r = model.getObjectByName('mixamorigRightUpLeg') ?? model.getObjectByName('mixamorig:RightUpLeg');
   if (!l || !r) return 0;
   const right = r.getWorldPosition(new THREE.Vector3()).sub(l.getWorldPosition(new THREE.Vector3())).setY(0);
   const fwd = new THREE.Vector3(0, 1, 0).cross(right).normalize();

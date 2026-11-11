@@ -3,9 +3,11 @@ import type { Input } from '../core/input';
 import { Btn, type PlayerCommand } from '../net/protocol';
 import type { Player } from '../player/player';
 import type { FpArms, HandTarget } from './arms';
+import { fitGrip, sphereDistance, type DistanceFn, type GripPose } from './grip';
 import { TimelinePlayer, type Timeline, type V3 } from './timeline';
 import type { Viewmodel } from './viewmodel';
-import type { WeaponDef } from './weapons';
+import { motionProfile, ViewmodelMotion } from './motion';
+import type { HandAnchor, WeaponDef } from './weapons';
 
 export interface ShotRequest {
   origin: THREE.Vector3;
@@ -18,9 +20,10 @@ export interface WeaponState {
   mag: number;
   reserve: number;
   vm: Viewmodel;
+  unlocked: boolean;
 }
 
-type Action = 'draw' | 'idle' | 'reload' | 'holster' | 'cycle' | 'inspect';
+type Action = 'draw' | 'idle' | 'reload' | 'holster' | 'cycle' | 'inspect' | 'loot';
 
 /** Critically damped-ish spring on three axes. */
 class Spring3 {
@@ -46,6 +49,10 @@ class Spring3 {
 const _zero = new THREE.Vector3();
 const _v3: V3 = [0, 0, 0];
 const _r3: V3 = [0, 0, 0];
+const _hitPoint = new THREE.Vector3();
+const _near = new THREE.Vector3();
+/** How far a hand travelling between grips keeps its wrist from the gun's surface. */
+const HAND_CLEARANCE = 0.045;
 
 /**
  * First-person weapon handling. `tick` is simulation (ammo, fire timing, what action is running)
@@ -79,12 +86,19 @@ export class WeaponController {
   private firePartT = 1;
   private kickPos = new Spring3(260, 22);
   private kickRot = new Spring3(240, 20);
-  private swayRot = new Spring3(120, 14);
-  private sprintBlend = 0;
-  private crouchBlend = 0;
-  private bobT = 0;
-  private strafeTilt = 0;
+  private obstructionSpring = new Spring3(150, 18);
+  private currentObstruction = 0;
+  private triggerPull = 0;
+  /** Development aid: hold a hand at a named anchor regardless of the animation. */
+  debugHands: { l?: string; r?: string } = {};
+  /** Solved grips, one per weapon, anchor and hand. */
+  private grips = new Map<string, GripPose>();
+  private lootTargetWorld: THREE.Vector3 | null = null;
+  /** Weapon to bring up once the reach for it has finished. */
+  private afterLoot = -1;
+  private mapColliders: THREE.Box3[] = [];
   private dryT = 0;
+  readonly motion = new ViewmodelMotion();
 
   onFire: ((w: WeaponState) => void) | null = null;
   onDryFire: (() => void) | null = null;
@@ -104,7 +118,80 @@ export class WeaponController {
     if (arms) viewScene.add(arms.root);
     this.flashLight = new THREE.PointLight(0xffb060, 0, 3, 2);
     viewScene.add(this.flashLight);
+    this.bakeGrips();
     this.select(0);
+  }
+
+  /** Solve every grip the weapons use up front, so no reload hitches on its first play. */
+  private bakeGrips(): void {
+    if (!this.arms) return;
+    const t0 = performance.now();
+    let blocked = 0;
+    for (const w of this.weapons) {
+      const d = w.def;
+      const use = (side: 'l' | 'r', name: string): void => {
+        blocked += this.grip(w, name, side)?.blocked ?? 0;
+      };
+      use('r', d.restRight);
+      use('l', d.restLeft);
+      for (const tl of Object.values(d.anims)) {
+        for (const [, name] of tl?.hands ?? []) use('l', name);
+        for (const [, name] of tl?.rhands ?? []) use('r', name);
+      }
+    }
+    if (import.meta.env.DEV) {
+      console.info(`grips: ${this.grips.size} solved in ${(performance.now() - t0).toFixed(0)} ms, ${blocked} blocked fingers`);
+    }
+  }
+
+  /** Drop the solved grips (after editing hand anchors) so they are solved again on next use. */
+  invalidateGrips(): void {
+    this.grips.clear();
+  }
+
+  /** What a hand at this anchor can touch: the gun (or one loose part), plus the hand it wraps. */
+  private gripDistance(w: WeaponState, a: HandAnchor, side: 'l' | 'r'): DistanceFn | null {
+    if (a.air) return null;
+    const surface = w.vm.surface(a.solo && a.part ? a.part : 'all');
+    const other = a.over ? this.grip(w, a.over, side === 'l' ? 'r' : 'l') : null;
+    return other
+      ? (p, max) => Math.min(surface.distance(p, max), sphereDistance(other.spheres, p, max))
+      : (p, max) => surface.distance(p, max);
+  }
+
+  /** The solved grip for a hand anchor, in holder space with the gun's parts at rest. */
+  private grip(w: WeaponState, name: string, side: 'l' | 'r'): GripPose | null {
+    if (!this.arms) return null;
+    const key = `${w.def.id}:${name}:${side}`;
+    const cached = this.grips.get(key);
+    if (cached) return cached;
+    const a = w.def.hands[name];
+    if (!a) return null;
+    const pose = this.arms.solveGrip(
+      side, new THREE.Vector3(...a.pos), new THREE.Vector3(...a.fwd).normalize(), new THREE.Vector3(...a.back).normalize(),
+      a, this.gripDistance(w, a, side));
+    this.grips.set(key, pose);
+    return pose;
+  }
+
+  /**
+   * Development tool (run from the console): nudge a hand anchor of the current weapon to where
+   * the hand sits best on the model, apply it, and return the values to paste into weapons.ts.
+   */
+  fitGrip(name: string, side: 'l' | 'r', opts: Parameters<typeof fitGrip>[4] = {}): Record<string, unknown> | null {
+    const w = this.weapon;
+    const a = w.def.hands[name];
+    if (!this.arms || !a) return null;
+    const dist = this.gripDistance(w, a, side);
+    const fit = fitGrip(
+      (p, f, b) => this.arms!.solveGrip(side, p, f, b, a, dist),
+      new THREE.Vector3(...a.pos), new THREE.Vector3(...a.fwd).normalize(), new THREE.Vector3(...a.back).normalize(), opts);
+    const r = (v: THREE.Vector3, n: number): V3 => v.toArray().map((x) => +x.toFixed(n)) as V3;
+    a.pos = r(fit.pos, 4);
+    a.fwd = r(fit.fwd, 3);
+    a.back = r(fit.back, 3);
+    this.invalidateGrips();
+    return { pos: a.pos, fwd: a.fwd, back: a.back, score: +fit.score.toFixed(2), ...fit.pose.contact, blocked: fit.pose.blocked };
   }
 
   get weapon(): WeaponState {
@@ -121,6 +208,10 @@ export class WeaponController {
 
   get busy(): boolean {
     return this.action !== 'idle';
+  }
+
+  get obstruction(): number {
+    return this.currentObstruction;
   }
 
   setVisible(on: boolean): void {
@@ -148,8 +239,84 @@ export class WeaponController {
     this.cooldown = 0;
     this.kickPos.reset();
     this.kickRot.reset();
+    this.motion.setProfile(motionProfile(this.weapon.def.id));
+    this.motion.reset();
     this.outOfAmmo = false;
+    this.afterLoot = -1;
+    this.lootTargetWorld = null;
     this.play('draw', this.weapon.def.anims.draw);
+  }
+
+  hasWeapon(id: string): boolean {
+    return this.weapons.some((w) => w.def.id === id && w.unlocked);
+  }
+
+  isCurrentWeapon(id: string): boolean {
+    return this.weapon.def.id === id;
+  }
+
+  unlockWeapon(slotOrId: number | string, ammo?: number): boolean {
+    const w = typeof slotOrId === 'number'
+      ? this.weapons[slotOrId]
+      : this.weapons.find((x) => x.def.id === slotOrId);
+    if (!w) return false;
+    w.unlocked = true;
+    if (ammo !== undefined && ammo > 0) {
+      w.reserve = Math.min(w.def.reserve * 2, w.reserve + ammo);
+    }
+    const idx = this.weapons.indexOf(w);
+    if (idx >= 0 && idx !== this.current) {
+      this.requestSwitch(idx);
+    }
+    return true;
+  }
+
+  addAmmo(slotOrId: number | string, amount: number): { added: number; full: boolean } {
+    const w = typeof slotOrId === 'number'
+      ? this.weapons[slotOrId]
+      : this.weapons.find((x) => x.def.id === slotOrId);
+    if (!w) return { added: 0, full: true };
+    const maxReserve = w.def.reserve * 2;
+    if (w.reserve >= maxReserve) return { added: 0, full: true };
+    const toAdd = Math.min(amount, maxReserve - w.reserve);
+    w.reserve += toAdd;
+    this.outOfAmmo = false;
+    return { added: toAdd, full: false };
+  }
+
+  canAddAmmo(slotOrId: number | string): boolean {
+    const w = typeof slotOrId === 'number'
+      ? this.weapons[slotOrId]
+      : this.weapons.find((x) => x.def.id === slotOrId);
+    if (!w) return false;
+    return w.reserve < w.def.reserve * 2;
+  }
+
+  setObstacleColliders(colliders: THREE.Box3[]): void {
+    this.mapColliders = colliders;
+  }
+
+  /** Reach out with the support hand for something being picked up. False if the hands are busy. */
+  playLoot(targetWorldPos?: THREE.Vector3): boolean {
+    const tl = this.weapon.def.anims.loot;
+    if (!tl || (this.action !== 'idle' && this.action !== 'inspect')) return false;
+    this.lootTargetWorld = targetWorldPos ? targetWorldPos.clone() : null;
+    this.play('loot', tl);
+    return true;
+  }
+
+  /** Pick a weapon up off the ground: reach for it, then bring it up in place of the current one. */
+  takeWeapon(id: string, ammo: number, at?: THREE.Vector3): boolean {
+    const i = this.weapons.findIndex((w) => w.def.id === id);
+    if (i < 0) return false;
+    const w = this.weapons[i];
+    w.unlocked = true;
+    w.reserve = Math.min(w.def.reserve * 2, w.reserve + ammo);
+    this.outOfAmmo = false;
+    if (i === this.current) return true;
+    if (this.playLoot(at)) this.afterLoot = i;
+    else this.requestSwitch(i);
+    return true;
   }
 
   private play(a: Action, tl: Timeline, speed = 1): void {
@@ -162,6 +329,8 @@ export class WeaponController {
   }
 
   private requestSwitch(i: number): void {
+    if (i < 0 || i >= this.weapons.length) return;
+    if (!this.weapons[i].unlocked) return;
     if (i === this.current && this.action !== 'holster') return;
     this.nextWeapon = i;
     if (this.action === 'holster') return;
@@ -200,13 +369,35 @@ export class WeaponController {
     this.bloom = Math.max(0, this.bloom - dt * 0.25);
     this.dryT = Math.max(0, this.dryT - dt);
 
-    // --- Weapon switching
+    // Trigger finger tracking: squeeze trigger on hold/fire, recover on release
+    if (held(Btn.Fire) || this.cooldown > 0) {
+      this.triggerPull = THREE.MathUtils.damp(this.triggerPull, 1, 35, dt);
+    } else {
+      this.triggerPull = THREE.MathUtils.damp(this.triggerPull, 0, 22, dt);
+    }
+
+    // --- Weapon switching (only cycles through unlocked weapons)
     if (player.alive) {
       const n = this.weapons.length;
-      let want = cmd.weapon >= 0 && cmd.weapon < n ? cmd.weapon : -1;
-      if (pressed(Btn.NextWeapon)) want = (this.current + 1) % n;
-      if (pressed(Btn.PrevWeapon)) want = (this.current + n - 1) % n;
-      if (want >= 0 && want !== (this.action === 'holster' ? this.nextWeapon : this.current)) this.requestSwitch(want);
+      let want = -1;
+      if (cmd.weapon >= 0 && cmd.weapon < n && this.weapons[cmd.weapon].unlocked) {
+        want = cmd.weapon;
+      }
+      if (pressed(Btn.NextWeapon)) {
+        for (let s = 1; s < n; s++) {
+          const idx = (this.current + s) % n;
+          if (this.weapons[idx].unlocked) { want = idx; break; }
+        }
+      }
+      if (pressed(Btn.PrevWeapon)) {
+        for (let s = 1; s < n; s++) {
+          const idx = (this.current + n - s) % n;
+          if (this.weapons[idx].unlocked) { want = idx; break; }
+        }
+      }
+      if (want >= 0 && want !== (this.action === 'holster' ? this.nextWeapon : this.current)) {
+        this.requestSwitch(want);
+      }
     }
 
     // --- Timeline events
@@ -223,14 +414,49 @@ export class WeaponController {
           d = w.def;
           break; // the rest of this list belonged to the holster timeline
         } else if (this.action !== 'idle') {
+          const next = this.action === 'loot' ? this.afterLoot : -1;
           this.action = 'idle';
           // Keep the timeline's tail playing for presentation; logic is free again.
+          this.afterLoot = -1;
+          if (next >= 0) this.requestSwitch(next);
         }
       } else if (ev.startsWith('drop:')) {
         this.dropPart(ev.slice(5));
       } else if (ev === 'eject') {
         w.vm.eject();
         this.onSound?.('casing');
+      } else if (ev === 'mag_in') {
+        // The magazine seats: a sharp push up into the well that the hands then absorb
+        this.motion.bump(-0.004, 0.006, 0.03, -0.016);
+        this.onSound?.(ev);
+      } else if (ev === 'mag_out') {
+        this.motion.bump(0.002, -0.004, -0.014, 0.006);
+        this.onSound?.(ev);
+      } else if (ev === 'mag_insert') {
+        // The magazine meets the mouth of the well: a knock sideways before the push
+        this.motion.bump(0.001, 0.002, 0.008, -0.02);
+        this.onSound?.(ev);
+      } else if (ev === 'round_in') {
+        // A round thumbed down into the action
+        this.motion.bump(0, -0.003, -0.012, 0.01);
+        this.onSound?.(ev);
+      } else if (ev === 'tug') {
+        // A pull on the seated magazine to check the catch has it (silent)
+        this.motion.bump(0.001, -0.003, -0.01, 0.008);
+      } else if (ev === 'grip') {
+        // The support hand lands back on the gun
+        this.motion.bump(-0.002, -0.002, 0.008, -0.012);
+        this.onSound?.(ev);
+      } else if (ev === 'charge_fwd' || ev === 'slide' || ev === 'bolt_release') {
+        // Bolt or slide slams home
+        this.motion.bump(-0.009, 0.002, -0.035, 0.012);
+        this.onSound?.(ev);
+      } else if (ev === 'charge_back' || ev === 'bolt' || ev === 'slide_back') {
+        this.motion.bump(0.008, 0.001, 0.022, -0.008);
+        this.onSound?.(ev);
+      } else if (ev === 'bolt_up' || ev === 'bolt_fwd') {
+        this.motion.bump(ev === 'bolt_fwd' ? -0.004 : 0.002, 0.001, 0.008, ev === 'bolt_up' ? 0.02 : -0.012);
+        this.onSound?.(ev);
       } else {
         this.onSound?.(ev);
       }
@@ -304,6 +530,7 @@ export class WeaponController {
     const d = w.def;
     w.mag--;
     this.cooldown = 60 / d.rpm + d.cycleTime;
+    this.triggerPull = 1;
     const q = new THREE.Quaternion().setFromEuler(
       new THREE.Euler(cmd.pitch + player.punchPitch + player.viewOffset.x, cmd.yaw + player.punchYaw + player.viewOffset.y, 0, 'YXZ'));
     const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
@@ -320,12 +547,7 @@ export class WeaponController {
     this.bloom = Math.min(0.08, this.bloom + d.recoilPitch * 0.3);
 
     // Viewmodel kick (presentation, but cheap to start here)
-    const ads = 1 - this.aimBlend * 0.55;
-    this.kickPos.v.y += d.kickPos[0] * 60 * ads;
-    this.kickPos.v.z += d.kickPos[1] * 60 * ads;
-    this.kickRot.v.x += d.kickRot[0] * 60 * ads;
-    this.kickRot.v.y += (Math.random() - 0.5) * 2 * d.kickRot[1] * 60 * ads;
-    this.kickRot.v.z += (Math.random() - 0.5) * 2 * d.kickRot[2] * 60 * ads;
+    this.motion.fire(this.sprayShots, this.aimBlend, player.crouching);
     this.flashT = 0.05;
     this.firePartT = 0;
     w.vm.flash.material.rotation = Math.random() * Math.PI * 2;
@@ -351,68 +573,91 @@ export class WeaponController {
   /** Set by the game so dropped parts can be placed in the world. */
   cameraRef: THREE.Camera | null = null;
 
-  render(dt: number, alpha: number, input: Input, player: Player, camera: THREE.PerspectiveCamera, baseFov: number): void {
+  render(dt: number, alpha: number, _input: Input, player: Player, camera: THREE.PerspectiveCamera, baseFov: number): void {
     const w = this.weapon;
     const d = w.def;
     const vm = w.vm;
     const t = THREE.MathUtils.smoothstep(this.aimBlend, 0, 1);
     const ads = t;
 
+    // --- Environmental Edge Detection & Obstacle Clearance System ---
+    // Prevent weapon barrel, hands, and viewmodel from clipping through walls, cover, and level geometry.
+    // How far the muzzle sits in front of the eye at the hip, plus a little air
+    const reach = -(d.hipPos[2] + d.muzzle[2]) + 0.06;
+    let minHitDist = reach;
+    if (this.mapColliders.length > 0) {
+      const camPos = new THREE.Vector3();
+      camera.getWorldPosition(camPos);
+      const camDir = new THREE.Vector3();
+      camera.getWorldDirection(camDir);
+      const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+
+      const camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+      // Along the line of sight, and along the line the gun itself lies on at the hip
+      const gunLine = camPos.clone().addScaledVector(camRight, d.hipPos[0]).addScaledVector(camUp, d.hipPos[1] * 0.6);
+      const rays = [new THREE.Ray(camPos, camDir), new THREE.Ray(gunLine, camDir)];
+
+      for (const box of this.mapColliders) {
+        for (const r of rays) {
+          if (r.intersectBox(box, _hitPoint)) {
+            const dist = r.origin.distanceTo(_hitPoint);
+            if (dist < minHitDist) minHitDist = dist;
+          }
+        }
+      }
+    }
+
+    const targetObs = Math.max(0, reach - minHitDist);
+    this.obstructionSpring.update(dt, new THREE.Vector3(targetObs, 0, 0));
+    const obs = Math.max(0, this.obstructionSpring.x.x);
+    this.currentObstruction = obs;
+
+    // Something right in front of the muzzle: the sights can't come up
+    const block = THREE.MathUtils.smoothstep(obs, 0, 0.35);
+    const effectiveAds = ads * (1 - block);
+
     // --- FOV (ADS zoom)
-    const fov = THREE.MathUtils.lerp(baseFov, d.adsFov, ads);
+    const fov = THREE.MathUtils.lerp(baseFov, d.adsFov, effectiveAds);
     if (Math.abs(camera.fov - fov) > 0.01) {
       camera.fov = fov;
       camera.updateProjectionMatrix();
     }
 
-    const pos = new THREE.Vector3(...d.hipPos).lerp(new THREE.Vector3(...d.adsPos), ads);
+    const pos = new THREE.Vector3(...d.hipPos).lerp(new THREE.Vector3(...d.adsPos), effectiveAds);
     const rot = new THREE.Euler(0, 0, 0, 'YXZ');
 
-    // Sway: the gun lags behind mouse movement, less so when aiming
-    const swayAmt = (1 - ads * 0.85) * d.weight;
-    const swayTarget = new THREE.Vector3(
-      THREE.MathUtils.clamp(input.mouseDY * 0.0011, -0.08, 0.08) * swayAmt,
-      THREE.MathUtils.clamp(input.mouseDX * 0.0011, -0.08, 0.08) * swayAmt,
-      THREE.MathUtils.clamp(input.mouseDX * 0.0016, -0.1, 0.1) * swayAmt,
-    );
-    this.swayRot.update(dt, swayTarget);
-    rot.x += this.swayRot.x.x;
-    rot.y += this.swayRot.x.y;
-    rot.z += this.swayRot.x.z;
-    pos.x += this.swayRot.x.y * 0.06;
-    pos.y -= this.swayRot.x.x * 0.06;
-
-    // Strafe tilt + walk bob (figure-eight), damped when aiming
-    const right = new THREE.Vector3(1, 0, 0).applyAxisAngle(THREE.Object3D.DEFAULT_UP, player.yaw);
-    const side = player.velocity.dot(right) / 5.2;
-    this.strafeTilt = THREE.MathUtils.damp(this.strafeTilt, THREE.MathUtils.clamp(side, -1, 1), 8, dt);
-    rot.z -= this.strafeTilt * 0.06 * (1 - ads * 0.8);
-    const hs = player.onGround ? Math.min(1.5, player.moveFactor) : 0;
-    this.bobT += dt * (6.5 + hs * 4) * (hs > 0.1 ? 1 : 0.25);
-    const bobAmt = (0.0025 + hs * 0.011) * (1 - ads * 0.92) * (0.7 + d.weight * 0.3);
-    pos.x += Math.sin(this.bobT) * bobAmt;
-    pos.y += Math.abs(Math.cos(this.bobT)) * bobAmt * 0.9 - bobAmt * 0.5;
-    rot.z += Math.sin(this.bobT) * bobAmt * 1.5;
-    if (!player.onGround) pos.y += THREE.MathUtils.clamp(player.velocity.y * -0.004, -0.02, 0.03);
-
-    // Sprint: gun swings down and across
-    this.sprintBlend = THREE.MathUtils.damp(this.sprintBlend, player.sprinting && this.action !== 'reload' ? 1 : 0, 9, dt);
-    const sb = this.sprintBlend;
-    if (sb > 0.001) {
-      const pistol = d.id === 'pistol';
-      pos.x += sb * (pistol ? -0.02 : -0.05);
-      pos.y += sb * (pistol ? -0.06 : -0.035) + Math.abs(Math.sin(this.bobT)) * 0.012 * sb;
-      pos.z += sb * 0.02;
-      rot.x += sb * (pistol ? -0.55 : -0.25);
-      rot.y += sb * (pistol ? 0.2 : 0.7);
-      rot.z += sb * (pistol ? 0.1 : 0.3);
+    // Against a wall the gun comes back and up into a high ready instead of poking through it
+    if (block > 0.001) {
+      pos.z += block * 0.09;
+      pos.y += block * 0.015;
+      pos.x -= block * 0.035;
+      rot.x += block * 0.62;
+      rot.y += block * 0.16;
+      rot.z += block * 0.22;
     }
-    // Crouch: tuck the gun in a little
-    this.crouchBlend = THREE.MathUtils.damp(this.crouchBlend, player.crouching ? 1 : 0, 8, dt);
-    rot.z += this.crouchBlend * 0.05 * (1 - ads);
-    pos.y -= this.crouchBlend * 0.006 * (1 - ads);
 
-    // Recoil springs
+    // Purposeful shoulder arc when raising or lowering into ADS
+    const adsArc = Math.sin(Math.PI * effectiveAds);
+    const arc = this.motion.profile.adsArc;
+    pos.x += adsArc * arc.pos[0];
+    pos.y += adsArc * arc.pos[1];
+    pos.z += adsArc * arc.pos[2];
+    rot.x += adsArc * arc.rot[0];
+    rot.y += adsArc * arc.rot[1];
+    rot.z += adsArc * arc.rot[2];
+
+    // Everything that moves the gun in the hands: recoil, sway, inertia, idle, gait, air, crouch, sprint
+    this.motion.update({
+      dt, yaw: player.yaw, pitch: player.pitch, velocity: player.velocity, onGround: player.onGround,
+      crouching: player.crouching, sprinting: player.sprinting && player.alive, ads: effectiveAds,
+      sprintAllowed: this.action === 'reload' || this.action === 'inspect' ? 0.35 : 1,
+    });
+    pos.add(this.motion.pos);
+    rot.x += this.motion.rot.x;
+    rot.y += this.motion.rot.y;
+    rot.z += this.motion.rot.z;
+
+    // Handling bumps from animation events
     this.kickPos.update(dt);
     this.kickRot.update(dt);
     pos.y += this.kickPos.x.y;
@@ -424,10 +669,10 @@ export class WeaponController {
     // Dry fire: a little trigger slap
     if (this.dryT > 0) rot.x += Math.sin((0.2 - this.dryT) / 0.2 * Math.PI) * 0.015;
 
-    // Timeline (reload, draw, holster, cycle, inspect), sampled between ticks
+    // Timeline (reload, draw, holster, cycle, inspect, loot), sampled between ticks
     const animT = this.anim.t;
     if (this.anim.playing) this.anim.t = animT + alpha * (1 / 60) * this.anim.speed;
-    const tlScale = this.action === 'reload' || this.action === 'inspect' ? 1 - ads : 1;
+    const tlScale = this.action === 'reload' || this.action === 'inspect' ? 1 - effectiveAds : 1;
     const ap = this.anim.value('pos', _v3);
     pos.x += ap[0] * tlScale;
     pos.y += ap[1] * tlScale;
@@ -458,6 +703,8 @@ export class WeaponController {
       const shown = this.anim.shown(role);
       vm.setPartVisible(role, shown ?? !(d.hiddenParts ?? []).includes(role));
     }
+    // The magazine in hand is loaded unless it is the empty one on its way out
+    vm.setRoundVisible(w.mag > 0 || (this.action === 'reload' && animT > 0.8));
     this.anim.t = animT;
 
     vm.group.position.copy(pos);
@@ -467,20 +714,21 @@ export class WeaponController {
     const showGun = !this.scoped;
     vm.group.visible = showGun;
     const dot = vm.group.getObjectByName('reddot');
-    if (dot) dot.visible = ads > 0.75;
+    if (dot) dot.visible = effectiveAds > 0.75;
     vm.updateCasings(dt);
 
     // Arms on the gun
     if (this.arms) {
       this.arms.visible = showGun && this.holder.visible;
       if (showGun) {
-        const L = this.handTarget('l', d.restLeft);
-        const R = this.handTarget('r', d.restRight);
-        const m = vm.group.matrix;
-        const caps = d.colliders
-          .filter((c) => !c.part || vm.partVisible(c.part))
-          .map((c) => ({ a: vm.partPoint(c.part, c.a).applyMatrix4(m), b: vm.partPoint(c.part, c.b).applyMatrix4(m), r: c.r, hand: c.hand }));
-        this.arms.update(L, R, new THREE.Vector3(pos.x - d.hipPos[0], 0, 0).multiplyScalar(0.3), caps);
+        const L = this.handTarget('l', d.restLeft, camera);
+        const R = this.handTarget('r', d.restRight, camera);
+        const shoulderFollow = new THREE.Vector3(
+          (pos.x - d.hipPos[0]) * 0.3,
+          (pos.y - d.hipPos[1]) * 0.22,
+          (pos.z - d.hipPos[2]) * 0.18,
+        );
+        this.arms.update(L, R, shoulderFollow, this.triggerPull);
       }
     }
 
@@ -494,27 +742,61 @@ export class WeaponController {
     if (on) vm.muzzle.getWorldPosition(this.flashLight.position);
   }
 
-  private handTarget(side: 'l' | 'r', rest: string): HandTarget {
+  private handTarget(side: 'l' | 'r', rest: string, camera?: THREE.Camera): HandTarget {
     const w = this.weapon;
-    const [a, b, u] = this.anim.hand(side, rest);
-    const A = w.def.hands[a] ?? w.def.hands[rest];
-    const B = w.def.hands[b] ?? w.def.hands[rest];
+    const held = this.debugHands[side];
+    const [a, b, u] = held ? [held, held, 1] : this.anim.hand(side, rest);
+    const nameA = w.def.hands[a] ? a : rest;
+    const nameB = w.def.hands[b] ? b : rest;
+    const A = w.def.hands[nameA];
+    const B = w.def.hands[nameB];
+    const gA = this.grip(w, nameA, side);
+    const gB = this.grip(w, nameB, side);
     const p1 = new THREE.Vector3(), f1 = new THREE.Vector3(), k1 = new THREE.Vector3();
     const p2 = new THREE.Vector3(), f2 = new THREE.Vector3(), k2 = new THREE.Vector3();
-    w.vm.anchor(A, p1, f1, k1);
-    w.vm.anchor(B, p2, f2, k2);
+    w.vm.anchor(A, p1, f1, k1, gA?.pos);
+    w.vm.anchor(B, p2, f2, k2, gB?.pos);
+
+    // Reaching for loot: the hand goes toward the thing itself, within what an arm can do
+    if (this.lootTargetWorld && camera) {
+      const inView = this.lootTargetWorld.clone().applyMatrix4(camera.matrixWorldInverse);
+      inView.x = THREE.MathUtils.clamp(inView.x, -0.26, 0.1);
+      inView.y = THREE.MathUtils.clamp(inView.y, -0.42, -0.2);
+      inView.z = THREE.MathUtils.clamp(inView.z, -0.62, -0.34);
+      const local = inView.applyMatrix4(w.vm.group.matrix.clone().invert());
+      if (A.air) p1.copy(local);
+      if (B.air) p2.copy(local);
+    }
+
     const e = THREE.MathUtils.smoothstep(u, 0, 1);
+    const moving = nameA !== nameB && e > 0.001 && e < 0.999;
     p1.lerp(p2, e);
     f1.lerp(f2, e).normalize();
     k1.lerp(k2, e).normalize();
+
+    // A hand changing grips lifts off the gun and comes back down, rather than sliding through it:
+    // an arc away from the palm side, and whatever of the gun is still in the way pushes the
+    // wrist out to arm's-thickness clearance.
+    if (moving) {
+      const arc = Math.sin(Math.PI * e);
+      const lift = 0.02 + Math.min(0.03, p1.distanceTo(p2) * 0.12);
+      p1.addScaledVector(k1, arc * lift);
+      p1.y -= arc * 0.012;
+      const d = w.vm.surface().closest(p1, _near, HAND_CLEARANCE);
+      if (d !== null && d > 1e-4) p1.addScaledVector(_near.subVectors(p1, _near).divideScalar(d), (HAND_CLEARANCE - d) * arc);
+    }
+
+    // Fingers open on the way and close again as the hand arrives
+    const rel = this.arms!.relaxed(side);
+    const open = moving ? Math.sin(Math.PI * e) * 0.75 : 0;
+    const fingers = rel.map((r, i) => {
+      const q = (gA?.quats[i] ?? r).clone().slerp(gB?.quats[i] ?? r, e);
+      return open > 0 ? q.slerp(r, open) : q;
+    });
+
     const m = w.vm.group.matrix;
     const q = w.vm.group.quaternion;
-    return {
-      pos: p1.applyMatrix4(m),
-      fwd: f1.applyQuaternion(q),
-      back: k1.applyQuaternion(q),
-      curl: THREE.MathUtils.lerp(A.curl, B.curl, e),
-    };
+    return { pos: p1.applyMatrix4(m), fwd: f1.applyQuaternion(q), back: k1.applyQuaternion(q), fingers };
   }
 }
 

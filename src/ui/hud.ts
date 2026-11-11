@@ -27,6 +27,8 @@ export class Hud {
   private magbar = $('hud-magbar');
   private br = document.querySelector<HTMLElement>('.hud-br')!;
   private prompt = $('ammo-prompt');
+  private interactEl = $('hud-interact');
+  private toastsEl = $('hud-toasts');
   private suppressEl = $('suppress-vignette');
   private grenadeEl = $('grenade-warn');
   private suppressT = 0;
@@ -179,5 +181,30 @@ export class Hud {
     this.feed.innerHTML = '';
     this.bannerT = 0;
     this.damageT = 0;
+  }
+
+  setInteractPrompt(prompt: { key: string; action: string; detail: string } | null): void {
+    if (!this.interactEl) return;
+    if (!prompt) {
+      this.interactEl.classList.add('hidden');
+      return;
+    }
+    this.interactEl.classList.remove('hidden');
+    const keyEl = this.interactEl.querySelector('.interact-key');
+    const actionEl = this.interactEl.querySelector('.interact-action');
+    const detailEl = this.interactEl.querySelector('.interact-detail');
+    if (keyEl) keyEl.textContent = prompt.key;
+    if (actionEl) actionEl.textContent = prompt.action;
+    if (detailEl) detailEl.textContent = prompt.detail;
+  }
+
+  lootNotification(title: string, sub?: string): void {
+    if (!this.toastsEl) return;
+    const toast = document.createElement('div');
+    toast.className = 'loot-toast';
+    toast.innerHTML = `<span class="loot-icon">◈</span> <span class="loot-title">${title}</span>${sub ? ` <span class="loot-sub">${sub}</span>` : ''}`;
+    this.toastsEl.appendChild(toast);
+    setTimeout(() => toast.classList.add('fade-out'), 2000);
+    setTimeout(() => toast.remove(), 2450);
   }
 }

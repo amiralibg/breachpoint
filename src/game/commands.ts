@@ -18,6 +18,7 @@ export class CommandBuilder {
     if (k('KeyR')) this.latched |= Btn.Reload;
     if (k('Space')) this.latched |= Btn.Jump;
     if (k('KeyF')) this.latched |= Btn.Inspect;
+    if (k('KeyE')) this.latched |= Btn.Interact;
     if (k('KeyQ')) this.latched |= Btn.NextWeapon;
     if (k('Digit1')) this.weapon = 0;
     if (k('Digit2')) this.weapon = 1;

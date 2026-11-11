@@ -1,11 +1,11 @@
 import * as THREE from 'three';
 import type { CrowdAgent } from 'recast-navigation';
 import { loadGlb } from '../core/assets';
-import type { Audio } from '../core/audio';
+import type { Audio, SampleName } from '../core/audio';
 import type { EventBus } from '../game/events';
 import type { HitZone, Vec3 } from '../net/protocol';
 import type { Player } from '../player/player';
-import { WEAPONS, weaponModel } from '../weapons/weapons';
+import { WEAPONS, weaponModel, type WeaponDef } from '../weapons/weapons';
 import type { CoverMap, CoverPoint } from '../world/cover';
 import type { Effects } from '../world/effects';
 import { flashTexture } from '../world/effects';
@@ -14,7 +14,7 @@ import type { NavSystem } from '../world/navmesh';
 import { lineOfSight, raycastBoxes, raySegment, raySphere } from '../world/physics';
 import { RAPIER, type PhysicsWorld } from '../world/physics3d';
 import { retargetClips } from './retarget';
-import { SoldierRig, type CharacterProto } from './rig';
+import { HOLDS, SoldierRig, type CharacterProto } from './rig';
 import { Squad } from './squad';
 
 export interface EnemyStats {
@@ -38,7 +38,7 @@ export interface EnemyHit {
   point: THREE.Vector3;
 }
 
-type Role = 'rifleman' | 'flanker' | 'rusher';
+type Role = 'rifleman' | 'flanker' | 'rusher' | 'marksman';
 /** What the bot is doing (also shown by the F3 debug overlay). */
 export type State =
   | 'patrol' | 'investigate' | 'search' | 'moveCover' | 'cover' | 'peek' | 'engage' | 'suppress'
@@ -124,15 +124,20 @@ export class Enemy {
   private strafe = new THREE.Vector3();
   private flash: THREE.Sprite;
   private flashT = 0;
+  /** Scope glint (marksmen): grows while the shot is being lined up. */
+  private glint: THREE.Sprite | null = null;
   private throwT = -1;
   private evadeFrom: THREE.Vector3 | null = null;
   private searchPts: THREE.Vector3[] = [];
   private flankCd = 4 + Math.random() * 6;
   bloodPooled = false;
+  readonly weaponDef: WeaponDef;
 
   constructor(proto: CharacterProto, gun: THREE.Object3D, muzzleZ: number, spawn: THREE.Vector3, readonly stats: EnemyStats,
-    scene: THREE.Scene, role: Role, phys: PhysicsWorld | null) {
-    this.rig = new SoldierRig(proto, gun, scene, muzzleZ, phys);
+    scene: THREE.Scene, role: Role, phys: PhysicsWorld | null, weaponDef: WeaponDef = WEAPONS[0]) {
+    this.weaponDef = weaponDef;
+    this.mag = weaponDef.magSize;
+    this.rig = new SoldierRig(proto, gun, scene, muzzleZ, phys, HOLDS[weaponDef.id] ?? HOLDS.m4);
     this.rig.root.position.copy(spawn);
     this.position = spawn.clone();
     this.prevPos.copy(spawn);
@@ -144,6 +149,14 @@ export class Enemy {
     this.flash.visible = false;
     this.flash.scale.setScalar(0.32);
     this.rig.muzzle.add(this.flash);
+    if (weaponDef.id === 'sniper') {
+      this.glint = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: flashTexture, color: 0xd6ecff, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true,
+      }));
+      this.glint.visible = false;
+      this.glint.position.set(0, 0.09, -0.2); // the scope's front lens, in gun space
+      this.rig.gunPivot.add(this.glint);
+    }
     this.lastProgress.copy(spawn);
   }
 
@@ -176,6 +189,7 @@ export class Enemy {
     if (this.health <= 0) {
       this.dead = true;
       this.flash.visible = false;
+      if (this.glint) this.glint.visible = false;
       const force = zone === 'head' ? 11 : 12 + Math.min(amount, 120) * 0.07;
       this.rig.die(dir, zone, point, force);
       ctx.squad.forget(this);
@@ -468,7 +482,7 @@ export class Enemy {
     if (this.state === 'throw' && this.throwT >= 0) return;
 
     // ----- Reload: get behind something first if we can
-    const lowMag = this.mag < MAG * 0.3 && !this.sees && this.sinceSeen > 1.5;
+    const lowMag = this.mag < this.weaponDef.magSize * 0.3 && !this.sees && this.sinceSeen > 1.5;
     if ((this.mag === 0 || lowMag) && this.reloadT <= 0) {
       if (this.state !== 'reload') {
         this.setState('reload');
@@ -533,7 +547,9 @@ export class Enemy {
     // ----- Push: rushers, point blank, a hurt or reloading player
     const playerWeak = p.health < 30 && dist < 22;
     const pushWindow = sq.playerReloadingT > 0 && dist < 18;
-    if ((this.role === 'rusher' && dist < 32) || (dist < 6 && this.sees) || ((playerWeak || pushWindow) && hp > 0.5)) {
+    const holdsBack = this.role === 'marksman';
+    // A rusher closes from anywhere he can see the fight; he used to trade shots from across the map
+    if ((this.role === 'rusher' && dist < 75) || (dist < 6 && this.sees) || ((playerWeak || pushWindow) && hp > 0.5 && !holdsBack)) {
       if (this.state !== 'push' || this.arrived(2) || this.stateT > 1.5) {
         this.setState('push');
         this.go(threat, this.stats.speed);
@@ -584,6 +600,11 @@ export class Enemy {
         }
         const hide = this.suppressed > 0 ? 2.4 : 0.9 + Math.random() * 1.2;
         if (this.stateT < hide) return;
+        // A pistol is no use from across the yard: close the distance instead of trading shots
+        if (this.weaponDef.id === 'pistol' && dist > 20) {
+          this.advance(ctx, threat, dist);
+          return;
+        }
         // Only token holders pop up to fight; the rest suppress from cover or reposition
         if (sq.requestToken(this, MAX_ATTACKERS)) {
           this.peekPos = ctx.cover.peekPosition(this.cover, threat);
@@ -597,11 +618,15 @@ export class Enemy {
           this.advance(ctx, threat, dist);
           return;
         }
-        if (this.sinceKnown < 4 && this.canSuppress(ctx, threat)) {
+        // Covering fire: keep the player's head down while a squad mate is crossing open ground
+        const mateMoving = sq.age < 6 && ctx.enemies.some((e) => e !== this && !e.dead
+          && (e.state === 'moveCover' || e.state === 'flank' || e.state === 'push') && e.position.distanceTo(this.position) < 30);
+        if ((this.sinceKnown < 4 || mateMoving) && this.canSuppress(ctx, threat)) {
           this.setState('suppress');
           return;
         }
-        if (this.stateT > 6) this.advance(ctx, threat, dist);
+        // A marksman keeps his position; everyone else works forward
+        if (this.stateT > (this.role === 'marksman' ? 14 : 6)) this.advance(ctx, threat, dist);
         return;
       }
 
@@ -630,6 +655,11 @@ export class Enemy {
         // Exposed: get to cover if pressed, otherwise keep fighting (strafing) from here
         const aimedAt = this.playerAimingAtMe(ctx);
         const pressed = this.suppressed > 0.4 || this.hurtT < 1 || aimedAt;
+        if (this.weaponDef.id === 'pistol' && dist > 22 && this.stateT > 0.6) {
+          sq.releaseToken(this);
+          this.advance(ctx, threat, dist);
+          return;
+        }
         if (!sq.hasToken(this) && !sq.requestToken(this, MAX_ATTACKERS)) {
           this.advance(ctx, threat, dist);
           return;
@@ -662,8 +692,11 @@ export class Enemy {
 
   /** Move up to the next cover toward the player. */
   private advance(ctx: EnemyCtx, threat: THREE.Vector3, dist: number): void {
-    const keep = this.role === 'rifleman' ? 12 : 8;
-    const max = Math.max(keep + 4, Math.min(dist - 2, 30));
+    // Fight at the range the weapon is good at: a marksman hangs back, a pistol has to get close
+    const w = this.weaponDef.id;
+    const keep = w === 'sniper' ? 26 : w === 'pistol' ? 5 : this.role === 'rifleman' ? 12 : 8;
+    const reach = w === 'sniper' ? 60 : w === 'pistol' ? 15 : 30;
+    const max = Math.max(keep + 4, Math.min(w === 'sniper' ? dist + 12 : dist - 2, reach));
     if (this.takeCover(ctx, threat, { min: Math.min(keep, max - 2), max, travel: 22 })) {
       this.setState('moveCover');
       return;
@@ -737,7 +770,7 @@ export class Enemy {
       this.reloadT -= dt;
       this.rig.reload = 1 - this.reloadT / 2.6;
       if (this.reloadT <= 0) {
-        this.mag = MAG;
+        this.mag = this.weaponDef.magSize;
         this.rig.reload = -1;
         ctx.audio.play('mag_in', { pos: this.position, gain: 0.6 }) || ctx.audio.click(this.position, 0.9);
       }
@@ -795,13 +828,16 @@ export class Enemy {
     if (s === 'investigate' && this.awareness < 0.8) crouch = speed < 1.5;
     if (s === 'suppress' && this.cover?.low) crouch = false;
     if (this.reloadT > 0 && behindLowCover) crouch = true;
+    // A marksman in the open drops to a knee for a steady shot
+    if (this.role === 'marksman' && (s === 'engage' || s === 'peek' && this.cover?.low) && speed < 0.4) crouch = true;
     this.rig.crouchTarget = crouch ? 1 : 0;
     this.rig.leanTarget = s === 'peek' || s === 'suppress' ? this.peekSide * 0.8 : 0;
     const engaging = !!threat && (this.sees || this.sinceSeen < 1.5 || s === 'suppress') && this.reloadT <= 0;
     this.rig.aimTarget = engaging && s !== 'retreat' && s !== 'evade' ? 1 : threat && this.combat && s !== 'patrol' ? 0.3 : 0;
     if (threat) {
       this.rig.aimPoint.copy(this.sees ? p.eye.setY(p.eye.y - 0.35) : threat.clone().setY(1.3));
-    }
+      this.rig.lookWeight = 1;
+    } else this.rig.lookWeight = 0;
 
     // Face the threat while engaged or covering, otherwise the way we're going
     const faceThreat = threat && (engaging || s === 'cover' || s === 'peek' || s === 'suppress' || s === 'investigate'
@@ -826,24 +862,42 @@ export class Enemy {
     const stance = s === 'peek' || s === 'engage' || s === 'push' || s === 'moveCover' && this.sees || s === 'suppress';
     const suppressing = s === 'suppress' && !this.sees && !!threat;
     const canShoot = !this.stats.passive && this.reloadT <= 0 && this.mag > 0 && this.throwT < 0 && p.alive && stance
-      && this.rig.aim > 0.6 && ((this.sees && this.seeT > this.stats.reaction) || suppressing);
+      && this.rig.aim > 0.6 && ((this.sees && this.seeT > this.stats.reaction) || suppressing)
+      // A scoped shot is lined up, not snapped: the glint is the player's warning to move
+      && (this.weaponDef.id !== 'sniper' || this.settle > 0.7 || suppressing);
+    const isSniper = this.weaponDef.id === 'sniper';
+    const interval = isSniper ? 1.2 : this.weaponDef.id === 'pistol' ? 0.22 : RPM_INTERVAL;
     if (canShoot && this.shotT <= 0) {
       if (this.burstLeft <= 0 && this.burstPause <= 0) {
         const dist = this.position.distanceTo(p.position);
-        this.burstLeft = suppressing ? 3 + Math.floor(Math.random() * 3)
-          : dist < 12 ? 4 + Math.floor(Math.random() * 4) : 2 + Math.floor(Math.random() * 3);
+        this.burstLeft = isSniper
+          ? 1
+          : suppressing
+          ? 3 + Math.floor(Math.random() * 3)
+          : dist < 12
+          ? 4 + Math.floor(Math.random() * 4)
+          : 2 + Math.floor(Math.random() * 3);
       }
       if (this.burstLeft > 0) {
         this.burstLeft--;
-        this.shotT = RPM_INTERVAL * (0.9 + Math.random() * 0.3);
+        this.shotT = interval * (0.9 + Math.random() * 0.3);
         this.shoot(ctx, speed > 0.8, suppressing ? threat! : null);
-        if (this.burstLeft === 0) this.burstPause = this.stats.fireInterval * (suppressing ? 1.3 : 0.6 + Math.random() * 0.8);
+        if (this.burstLeft === 0) {
+          this.burstPause = isSniper
+            ? 1.4 + Math.random() * 0.8
+            : this.stats.fireInterval * (suppressing ? 1.3 : 0.6 + Math.random() * 0.8);
+        }
       }
     }
     if (this.mag === 0 && this.reloadT <= 0 && this.state !== 'reload') this.decideT = 0;
 
     this.flashT -= dt;
     this.flash.visible = this.flashT > 0;
+    if (this.glint) {
+      const lining = isSniper && this.sees && this.rig.aim > 0.8 && this.reloadT <= 0 && !this.stats.passive;
+      this.glint.visible = lining;
+      if (lining) this.glint.scale.setScalar(0.1 + this.settle * 0.3 + Math.sin(ctx.time * 30) * 0.02);
+    }
   }
 
   private faceTowards(dir: THREE.Vector3, dt: number, rate: number): void {
@@ -881,7 +935,7 @@ export class Enemy {
     this.flashT = 0.05;
     this.flash.material.rotation = Math.random() * 6.28;
     this.rig.kick();
-    ctx.audio.gunshot(1.15, from, 'm4_shot');
+    ctx.audio.gunshot(this.weaponDef.soundPower, from, this.weaponDef.sound as SampleName);
 
     // Angular error (radians, 1 sigma)
     let sigma = THREE.MathUtils.lerp(0.075, 0.013, THREE.MathUtils.clamp(this.stats.accuracy * 2, 0, 1));
@@ -891,6 +945,8 @@ export class Enemy {
     if (this.hurtT < 0.5) sigma *= 1.8;
     sigma *= 1 + Math.min(1, p.moveFactor) * 0.6;
     if (!p.onGround) sigma *= 1.4;
+    // Scoped and settled: a still target gets hit, a moving one mostly doesn't
+    if (this.weaponDef.id === 'sniper' && !suppressAt) sigma *= 0.5 + Math.min(1, p.moveFactor) * 1.4;
     if (suppressAt) sigma = Math.max(sigma, 0.04);
     // The error wanders smoothly within a burst (a real spray), instead of pure noise
     this.aimErr.multiplyScalar(0.6).add(new THREE.Vector3(gauss(), gauss() * 0.8, gauss()).multiplyScalar(sigma * 0.8));
@@ -929,7 +985,8 @@ export class Enemy {
     if (hitPlayer) {
       const zone: HitZone = end.y > top.y - 0.25 ? 'head' : end.y < p.position.y + 0.85 ? 'leg' : 'torso';
       const mult = zone === 'head' ? 1.6 : zone === 'leg' ? 0.75 : 1;
-      ctx.onPlayerHit(this.stats.damage * mult * (0.85 + Math.random() * 0.3), this.position.clone(), zone);
+      const baseDmg = this.stats.damage * (this.weaponDef.damage / 30);
+      ctx.onPlayerHit(baseDmg * mult * (0.85 + Math.random() * 0.3), this.position.clone(), zone);
     }
   }
 
@@ -1070,21 +1127,28 @@ export class GrenadeSystem {
 
 // =================================================================================================
 
+/** Soldier models and a brightness gain for each (some are textured much darker than the world is lit). */
+const SOLDIER_MODELS: [name: string, gain: number][] = [['us_soldier', 1], ['soldier_ksk', 4], ['soldier_bw', 4]];
+
 export class EnemyManager {
   readonly enemies: Enemy[] = [];
   readonly squad = new Squad();
   grenades: GrenadeSystem;
-  private proto!: CharacterProto;
-  private muzzleZ = 0.58;
-  private gun!: THREE.Object3D;
+  /** Every soldier model available; each spawn picks one, so a squad is not five copies of one man. */
+  private protos: CharacterProto[] = [];
   private spawnCount = 0;
+  private gunM4!: THREE.Object3D;
+  private gunPistol!: THREE.Object3D;
+  private gunSniper!: THREE.Object3D;
   /** Character used for the first-person arms too. */
   get characterScene(): THREE.Object3D | null {
-    return this.proto?.scene ?? null;
+    return this.protos[0]?.scene ?? null;
   }
   phys: PhysicsWorld | null = null;
   nav: NavSystem | null = null;
   onMagDrop: ((mag: THREE.Object3D, vel: THREE.Vector3) => void) | null = null;
+  onDropGun: ((enemy: Enemy, pivot: THREE.Object3D, vel: THREE.Vector3, def: WeaponDef, ammo: number, size?: THREE.Vector3, center?: THREE.Vector3) => void) | null = null;
+  onEnemyDeath: ((enemy: Enemy, def: WeaponDef, ammo: number) => void) | null = null;
 
   constructor(private scene: THREE.Scene) {
     this.grenades = new GrenadeSystem(scene, null);
@@ -1098,25 +1162,53 @@ export class EnemyManager {
   async load(): Promise<void> {
     // Animations come from the three.js Soldier (Idle/Walk/Run); the character mesh is the
     // realistic "American Soldier Rigged" (Sketchfab, CC BY 4.0) when present.
-    const [anim, gun] = await Promise.all([loadGlb('characters/soldier.glb'), weaponModel(WEAPONS[0])]);
-    this.gun = gun;
-    this.muzzleZ = -WEAPONS[0].muzzle[2];
-    try {
-      const us = await loadGlb('characters/us_soldier.glb');
-      const clips = retargetClips(anim.scene, anim.animations, us.scene, { tPoseClip: 'TPose' });
-      this.proto = { scene: us.scene, animations: clips };
-    } catch (err) {
-      console.warn('Realistic soldier unavailable, using the default character', err);
-      this.proto = { scene: anim.scene, animations: anim.animations.filter((c) => c.name !== 'TPose') };
+    const [anim, gunM4, gunPistol, gunSniper] = await Promise.all([
+      loadGlb('characters/soldier.glb'),
+      weaponModel(WEAPONS[0]),
+      weaponModel(WEAPONS[1]),
+      weaponModel(WEAPONS[2]),
+    ]);
+    this.gunM4 = gunM4;
+    this.gunPistol = gunPistol;
+    this.gunSniper = gunSniper;
+    // Any Mixamo-rigged soldier works: its clips are retargeted from the one animated character.
+    for (const [name, gain] of SOLDIER_MODELS) {
+      try {
+        const m = await loadGlb(`characters/${name}.glb`);
+        m.scene.traverse((o) => {
+          const mat = (o as THREE.Mesh).material as THREE.MeshPhysicalMaterial | undefined;
+          if (!mat || !mat.isMaterial) return;
+          mat.color.multiplyScalar(gain);
+          // Exported with specular switched off, which reads as a black cut-out next to lit geometry
+          if (mat.isMeshPhysicalMaterial) mat.specularIntensity = 1;
+        });
+        this.protos.push({ scene: m.scene, animations: retargetClips(anim.scene, anim.animations, m.scene, { tPoseClip: 'TPose' }) });
+      } catch (err) {
+        console.warn(`Soldier model ${name} unavailable`, err);
+      }
+    }
+    if (!this.protos.length) {
+      this.protos.push({ scene: anim.scene, animations: anim.animations.filter((c) => c.name !== 'TPose') });
     }
   }
 
   /** `hunt`: the bot arrives knowing roughly where the player is (wave attackers). */
   spawn(at: THREE.Vector3, stats: EnemyStats, hunt?: THREE.Vector3): Enemy {
     const n = this.spawnCount++;
-    const role: Role = stats.passive ? 'rifleman' : n % 4 === 1 ? 'flanker' : n % 6 === 3 ? 'rusher' : 'rifleman';
-    const e = new Enemy(this.proto, this.gun, this.muzzleZ, at, stats, this.scene, role, this.phys);
+    const role: Role = stats.passive ? 'rifleman' : n % 7 === 4 ? 'marksman' : n % 4 === 1 ? 'flanker' : n % 6 === 3 ? 'rusher' : 'rifleman';
+    const isSniper = role === 'marksman';
+    const isPistol = role === 'flanker';
+    const def = isSniper ? WEAPONS[2] : isPistol ? WEAPONS[1] : WEAPONS[0];
+    const gunProto = isSniper ? this.gunSniper : isPistol ? this.gunPistol : this.gunM4;
+    const gunClone = gunProto.clone(true);
+    const muzzleZ = -def.muzzle[2];
+    // Spread the models over the spawn order (not by role: the same man shouldn't always be the sniper)
+    const proto = this.protos[(n * 5 + (n >> 2)) % this.protos.length];
+    const e = new Enemy(proto, gunClone, muzzleZ, at, stats, this.scene, role, this.phys, def);
+    // People differ in height
+    e.rig.root.scale.setScalar(0.96 + ((n * 37) % 9) * 0.01);
     e.rig.onMagDrop = (mag, vel) => this.onMagDrop?.(mag, vel);
+    e.rig.onDropGun = (pivot, vel, size, center) => this.onDropGun?.(e, pivot, vel, def, def.magSize, size, center);
     if (this.nav) {
       e.agent = this.nav.addAgent(at, stats.speed);
       const p = e.agent.position();
@@ -1189,6 +1281,7 @@ export class EnemyManager {
       this.nav.removeAgent(e.agent);
       e.agent = null;
     }
+    this.onEnemyDeath?.(e, e.weaponDef, e.weaponDef.magSize);
   }
 
   render(dt: number, alpha: number): void {

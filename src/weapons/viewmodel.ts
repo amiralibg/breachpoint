@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { flashTexture } from '../world/effects';
+import { applyGunFinish } from './finish';
+import { GunSurface } from './surface';
 import type { V3 } from './timeline';
 import { weaponModel, type HandAnchor, type WeaponDef } from './weapons';
 
@@ -46,7 +48,9 @@ export class Viewmodel {
   readonly muzzle = new THREE.Object3D();
   readonly flash: THREE.Sprite;
   private parts = new Map<string, Part>();
+  private surfaces = new Map<string, GunSurface>();
   private casings: Casing[] = [];
+  private round: THREE.Object3D | null = null;
   private casingGeo: THREE.BufferGeometry;
   private casingMat: THREE.MeshStandardMaterial;
 
@@ -67,6 +71,7 @@ export class Viewmodel {
         m.frustumCulled = false;
         const mat = m.material as THREE.MeshStandardMaterial;
         mat.envMapIntensity = 1.2;
+        if (!m.userData.noTouch && !mat.transparent) applyGunFinish(mat, def.finish);
       }
     });
 
@@ -96,13 +101,91 @@ export class Viewmodel {
       if (nodes.length) this.parts.set(role, { nodes, offset: new THREE.Vector3(), rot: new THREE.Quaternion() });
     }
     for (const p of def.hiddenParts ?? []) this.setPartVisible(p, false);
+    this.buildSurfaces(inv);
+    if (def.magRound) this.addMagRound(def.magRound);
 
     this.casingGeo = new THREE.CylinderGeometry(0.0028, 0.0028, def.id === 'pistol' ? 0.018 : 0.04, 8).rotateZ(Math.PI / 2);
     this.casingMat = new THREE.MeshStandardMaterial({ color: 0xc9a24a, metalness: 1, roughness: 0.3, envMapIntensity: 1.5 });
   }
 
+  /**
+   * The top cartridge of the magazine, sitting in the feed lips: what tells a loaded magazine from
+   * an empty one when it is turned toward the eye. Placed from the magazine's own bounds.
+   */
+  private addMagRound(spec: NonNullable<WeaponDef['magRound']>): void {
+    const node = this.parts.get('mag')?.nodes[0].node;
+    if (!node) return;
+    const box = new THREE.Box3().setFromObject(node);
+    if (box.isEmpty()) return;
+    const [len, r] = spec.size;
+    const caseLen = len * 0.7;
+    const brass = new THREE.MeshStandardMaterial({ color: 0xc9a24a, metalness: 1, roughness: 0.28, envMapIntensity: 1.4 });
+    const copper = new THREE.MeshStandardMaterial({ color: 0xb4683c, metalness: 1, roughness: 0.34, envMapIntensity: 1.4 });
+    const round = new THREE.Group();
+    round.name = 'mag-round';
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(r, r, caseLen, 14).rotateX(Math.PI / 2), brass);
+    body.position.z = (len - caseLen) / 2;
+    // Bullet: an ogive from the case mouth to the tip
+    const pts: THREE.Vector2[] = [];
+    const tipLen = len - caseLen;
+    for (let i = 0; i <= 8; i++) {
+      const u = i / 8;
+      pts.push(new THREE.Vector2(r * 0.8 * Math.cos(u * Math.PI * 0.5) ** 0.7, u * tipLen));
+    }
+    const tip = new THREE.Mesh(new THREE.LatheGeometry(pts, 14).rotateX(-Math.PI / 2), copper);
+    tip.position.z = (len - caseLen) / 2 - caseLen / 2;
+    for (const m of [body, tip]) {
+      m.frustumCulled = false;
+      m.userData.noTouch = true;
+      round.add(m);
+    }
+    const o = spec.offset ?? [0, 0, 0];
+    round.position.set((box.min.x + box.max.x) / 2 + o[0], box.max.y - r * 0.55 + o[1], (box.min.z + box.max.z) / 2 + o[2]);
+    this.group.add(round);
+    round.updateMatrixWorld(true);
+    node.attach(round);
+    this.round = round;
+  }
+
+  /** Show or hide the magazine's top round (an empty magazine has none). */
+  setRoundVisible(on: boolean): void {
+    if (this.round) this.round.visible = on;
+  }
+
   static async create(def: WeaponDef): Promise<Viewmodel> {
     return new Viewmodel(def, await weaponModel(def));
+  }
+
+  /**
+   * Touchable shapes, in holder space with every part at rest: 'all' is the gun as it looks at
+   * rest (hidden spares and parts left out), and each part role is that part by itself, for a
+   * hand holding a magazine that is out of the gun.
+   */
+  private buildSurfaces(toHolder: THREE.Matrix4): void {
+    const shown = (o: THREE.Object3D): boolean => {
+      for (let n: THREE.Object3D | null = o; n && n !== this.group; n = n.parent) if (!n.visible) return false;
+      return true;
+    };
+    const all: THREE.Mesh[] = [];
+    this.model.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.isMesh && shown(m) && !m.userData.noTouch) all.push(m);
+    });
+    this.surfaces.set('all', new GunSurface(all, toHolder));
+    for (const [role, part] of this.parts) {
+      const meshes: THREE.Mesh[] = [];
+      for (const n of part.nodes) {
+        n.node.traverse((o) => {
+          if ((o as THREE.Mesh).isMesh) meshes.push(o as THREE.Mesh);
+        });
+      }
+      this.surfaces.set(role, new GunSurface(meshes, toHolder));
+    }
+  }
+
+  /** The gun's touchable shape ('all') or one part's, in holder space at rest. */
+  surface(key = 'all'): GunSurface {
+    return this.surfaces.get(key) ?? this.surfaces.get('all')!;
   }
 
   hasPart(role: string): boolean {
@@ -129,9 +212,13 @@ export class Viewmodel {
     for (const n of this.parts.get(role)?.nodes ?? []) n.node.visible = on;
   }
 
-  /** Hand anchor in holder space, following the part it's attached to. */
-  anchor(a: HandAnchor, outPos: THREE.Vector3, outFwd: THREE.Vector3, outBack: THREE.Vector3): void {
-    outPos.set(...a.pos);
+  /**
+   * Hand anchor in holder space, following the part it's attached to. `seated` replaces the
+   * authored wrist position with the one the grip solver settled on.
+   */
+  anchor(a: HandAnchor, outPos: THREE.Vector3, outFwd: THREE.Vector3, outBack: THREE.Vector3, seated?: THREE.Vector3): void {
+    if (seated) outPos.copy(seated);
+    else outPos.set(...a.pos);
     outFwd.set(...a.fwd).normalize();
     outBack.set(...a.back).normalize();
     const p = a.part ? this.parts.get(a.part) : undefined;

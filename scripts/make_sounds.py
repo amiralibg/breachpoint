@@ -3,6 +3,11 @@
 Synthesize Breachpoint's sound effects into public/assets/audio (numpy + scipy, no downloads).
 
 Everything is built from physical pieces instead of beeps:
+  - gunshots: three files per weapon. `<gun>_shot_<i>` is the close, dry report (crack, muzzle
+    blast, low punch, the action cycling) and is short on purpose so automatic fire stays
+    articulate. `<gun>_tail_<i>` is the stereo slap-back off the compound walls, layered under the
+    player's own shots. `<gun>_far_<i>` is what the same shot sounds like from across the map: a
+    dull boom and its echoes, crossfaded in by distance in src/core/audio.ts.
   - impacts: a broadband contact transient that excites a bank of decaying modes (modal synthesis).
     Steel, aluminium, polymer, brass and the rifle body each have their own inharmonic modes, so a
     bolt slamming home rings like steel and a magazine seats with a dull aluminium/polymer clack.
@@ -10,17 +15,23 @@ Everything is built from physical pieces instead of beeps:
   - rattles: clusters of tiny impacts (rounds in a magazine, springs, loose sling hardware).
   - footsteps: heel strike + toe roll, with a granular gravel crunch on dirt or a hard scuff on
     asphalt; several variants per surface so steps never repeat.
-Run: npm run sounds
+Reload foley is one file per motion (release click, magazine out, pouch, insert, seat...); the
+weapon timelines in src/weapons/weapons.ts fire them at the moment the hands do it.
+Relative levels live in the MIX table in src/core/audio.ts, not here: files are written near full
+scale. Run: npm run sounds
 """
 import os
 import wave
 
 import numpy as np
-from scipy.signal import butter, sosfilt
+from scipy.interpolate import CubicSpline
+from scipy.signal import butter, resample_poly, sosfilt
 
 SR = 44100
+LOW_SR = 22050  # tails and distant layers have nothing above a few kHz
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "public", "assets", "audio")
 rng = np.random.default_rng(7)
+written = set()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -47,10 +58,20 @@ def filt(x, kind, f, order=2):
     return sosfilt(sos, x)
 
 
+def nband(d, lo, hi, order=2):
+    """Band noise at unit RMS, so layer gains mean the same thing whatever the bandwidth."""
+    x = filt(noise(d), "band", (lo, hi), order)
+    return x / (np.sqrt(np.mean(x ** 2)) or 1)
+
+
 def env(d, attack=0.0005, tau=0.05):
     t = time(d)
     a = np.clip(t / max(attack, 1e-5), 0, 1)
     return a * np.exp(-t / tau)
+
+
+def jit(a, s=0.08):
+    return a * (1 + rng.uniform(-s, s))
 
 
 def place(buf, x, at, gain=1.0):
@@ -69,20 +90,35 @@ def silence(d):
     return np.zeros(n_(d))
 
 
-def write(name, x, peak=0.9):
+def write(name, x, peak=0.9, drive=1.1, sr=SR, loop=False, norm=True):
+    """Write a mono (n,) or stereo (n, 2) buffer. `drive` is how hard it leans into the soft clip."""
     os.makedirs(OUT, exist_ok=True)
-    x = np.asarray(x, dtype=np.float64)
-    # Gentle fade-out so nothing clicks at the end
-    fade = min(len(x), n_(0.01))
-    x[-fade:] *= np.linspace(1, 0, fade)
-    m = np.max(np.abs(x)) or 1
-    x = np.tanh(x / m * 1.1) / np.tanh(1.1) * peak
+    x = np.array(x, dtype=np.float64)
+    if x.ndim == 1:
+        x = x[:, None]
+    if not loop:
+        # Gentle fade-out so nothing clicks at the end
+        fade = min(len(x), n_(0.01))
+        x[-fade:] *= np.linspace(1, 0, fade)[:, None]
+    if norm:
+        m = np.max(np.abs(x)) or 1
+        x = np.tanh(x / m * drive) / np.tanh(drive) * peak
+    if sr != SR:
+        if loop:
+            # Resample three laps and keep the middle one, so the filter never sees the seam
+            k = len(x) * sr // SR
+            x = resample_poly(np.tile(x, (3, 1)), sr, SR, axis=0)[k:2 * k]
+        else:
+            x = resample_poly(x, sr, SR, axis=0)
+        # The resampler's ringing can overshoot the peak
+        x *= min(1.0, peak / (np.max(np.abs(x)) or 1))
     data = (x * 32767).astype("<i2").tobytes()
     with wave.open(os.path.join(OUT, name), "wb") as w:
-        w.setnchannels(1)
+        w.setnchannels(x.shape[1])
         w.setsampwidth(2)
-        w.setframerate(SR)
+        w.setframerate(sr)
         w.writeframes(data)
+    written.add(name)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -138,10 +174,10 @@ def rattle(d, hits, material, gain=1.0, spread=1.0):
     return x * gain
 
 
-def cloth(d, gain=1.0):
+def cloth(d, gain=1.0, lo=700, hi=5200):
     """Fabric swish: slow swelling band noise with fibrous flutter."""
     t = time(d)
-    x = filt(noise(d), "band", (700, 5200), 1)
+    x = filt(noise(d), "band", (lo, hi), 1)
     flutter = 0.6 + 0.4 * np.abs(filt(noise(d), "low", 40, 1)) * 6
     swell = np.sin(np.pi * np.clip(t / d, 0, 1)) ** 1.5
     return x * flutter * swell * gain
@@ -154,6 +190,29 @@ def thump(f0, f1, d, gain=1.0):
     return np.sin(ph) * env(d, 0.001, d / 3.5) * gain
 
 
+def sweep(f0, f1, tau, d, attack=0.001):
+    """Pitch-dropping sine: the pressure pulse of a blast, settling from f0 to f1."""
+    t = time(d)
+    f = f1 + (f0 - f1) * np.exp(-t / (tau * 0.6))
+    return np.sin(2 * np.pi * np.cumsum(f) / SR) * np.clip(t / attack, 0, 1) * np.exp(-t / tau)
+
+
+def palm(gain=1.0, cut=1100, tau=0.009):
+    """A gloved hand landing on the gun: a soft, dull pat."""
+    return (filt(noise(0.06), "low", cut) * env(0.06, 0.0015, tau) * 1.2 + thump(210, 110, 0.06, 0.5)) * gain
+
+
+def crunch(d, density, gain, lo=1500, hi=9000):
+    """Granular gravel: lots of tiny grain impacts, front-loaded."""
+    x = silence(d + 0.01)
+    count = int(density * d)
+    for _ in range(count):
+        at = (rng.uniform(0, 1) ** 1.8) * d
+        g = filt(noise(0.004), "band", (lo, hi)) * env(0.004, 0.0002, rng.uniform(0.0004, 0.0012))
+        place(x, g, at, rng.uniform(0.2, 1.0) * (1 - at / d) ** 0.7)
+    return x * gain
+
+
 def mix(d, *parts):
     buf = silence(d)
     for at, x, *g in parts:
@@ -162,54 +221,244 @@ def mix(d, *parts):
 
 
 # ---------------------------------------------------------------------------------------------
-# Gunshots: supersonic crack, muzzle blast, body thump, mechanism clack and a compound slap-back
+# Gunshots
 
-def gunshot(name, power, mech="steel", mech_at=0.012):
-    d = 1.5 * power
-    crack = filt(noise(0.012), "high", 2500) * env(0.012, 0.0001, 0.0025)
-    blast = filt(noise(0.35 * power), "low", 5200) * env(0.35 * power, 0.0004, 0.045 * power)
-    blast += filt(noise(0.35 * power), "band", (150, 900)) * env(0.35 * power, 0.001, 0.08 * power) * 1.3
-    boom = thump(120 + 25 / power, 38, 0.32 * power, 1.4)
-    tail = filt(noise(1.1 * power), "low", 1100) * env(1.1 * power, 0.03, 0.28 * power)
-    slap = filt(noise(0.5 * power), "band", (250, 1800)) * env(0.5 * power, 0.004, 0.09 * power)
-    x = mix(d, (0, crack, 1.1), (0, blast), (0, boom), (0.05, tail, 0.25), (0.13, slap, 0.22), (0.27, slap, 0.1))
-    place(x, impact(mech, 0.18, bright=1.2, d=0.15), mech_at)
-    write(name, x)
+# Round trips to the compound's walls (the yard is 80 m across): [delay s, gain]
+WALLS = [(0.065, 1.0), (0.105, 0.8), (0.16, 0.62), (0.23, 0.5), (0.31, 0.38), (0.42, 0.27), (0.56, 0.17), (0.72, 0.1)]
+
+
+def echoes(d, bright, size=1.0, sub=0.5):
+    """
+    Slap-back off the walls: each return comes later, quieter, darker and more smeared than the
+    last, over a low rumble. `size` stretches the decay for bigger guns.
+    """
+    out = silence(d)
+    for at, g in WALLS:
+        at *= rng.uniform(0.9, 1.1)
+        length = 0.12 + at * 0.5
+        cut = max(320, bright / (1 + at * 5))
+        e = nband(length, 110, cut) * env(length, 0.004 + at * 0.03, (0.022 + at * 0.09) * size)
+        e += sweep(95, 48, 0.05 * size, length, attack=0.004) * sub
+        place(out, e, at, g * rng.uniform(0.75, 1.2))
+    return out + nband(d, 45, 420) * env(d, 0.08, 0.3 * size) * 0.35
+
+
+def level(x, rms, peak=0.97, win=0.1):
+    """
+    Soft-clip so the first `win` seconds land on a target RMS at a fixed peak. Variants of one gun
+    then match in loudness however their random layers fell, and the report is dense, not peaky.
+    """
+    x = x / (np.max(np.abs(x)) or 1)
+    k = n_(win)
+    lo, hi = 0.3, 8.0
+    for _ in range(40):
+        g = (lo * hi) ** 0.5
+        if np.sqrt(np.mean((np.tanh(x[:k] * g) / np.tanh(g) * peak) ** 2)) < rms:
+            lo = g
+        else:
+            hi = g
+    return np.tanh(x * g) / np.tanh(g) * peak
+
+
+GUNS = {
+    # 5.56 carbine: a hard supersonic crack over a tight blast, bolt carrier and buffer spring
+    "m4": dict(d=0.3, crack=1.3, crack_hp=2600, crack_tau=0.0024, hi=1.05, hi_tau=0.008, mid=(400, 2800), mid_tau=0.017,
+               low_tau=0.028, punch=(175, 60, 0.026), punch_gain=1.0, rms=0.3,
+               tail_d=1.3, tail_bright=3200, size=1.0, shots=4, tails=2),
+    # 9 mm pistol: less crack, a mid-forward pop, the slide snapping back and home
+    "pistol": dict(d=0.26, crack=0.75, crack_hp=1900, crack_tau=0.0015, hi=0.5, hi_tau=0.005, mid=(400, 2400), mid_tau=0.012,
+                   low_tau=0.02, punch=(200, 75, 0.018), punch_gain=1.0, rms=0.24,
+                   tail_d=1.0, tail_bright=2600, size=0.8, shots=4, tails=2),
+    # 7.62 bolt gun: the biggest crack and a long, heavy blast; nothing cycles by itself
+    "sniper": dict(d=0.6, crack=1.3, crack_hp=2200, crack_tau=0.003, hi=0.95, hi_tau=0.011, mid=(250, 1900), mid_tau=0.032,
+                   low_tau=0.065, punch=(125, 40, 0.075), punch_gain=1.6, rms=0.4,
+                   tail_d=2.0, tail_bright=2900, size=1.5, shots=3, tails=2),
+}
+
+
+def shot_close(gun):
+    """
+    The dry report. Everything starts on sample 0 and the bright layers are gone within ~20 ms,
+    so shots 80 ms apart stay separate; the length lives in the tail file instead.
+    """
+    p = GUNS[gun]
+    d = p["d"]
+    # One bipolar cycle: the N-wave of the muzzle blast, the same on every shot
+    k = n_(0.0005)
+    click = np.sin(2 * np.pi * np.arange(k) / k) * 2.5
+    crack = filt(noise(0.03), "high", jit(p["crack_hp"])) * env(0.03, 0.00005, jit(p["crack_tau"]))
+    # The blast in three bands, the bright ones dying first (the fireball cools in milliseconds)
+    hi = nband(d, 2000, 9000) * env(d, 0.0002, jit(p["hi_tau"]))
+    mid = nband(d, *p["mid"]) * env(d, 0.0004, jit(p["mid_tau"]))
+    low = nband(d, 90, 420) * env(d, 0.001, jit(p["low_tau"]))
+    f0, f1, tau = p["punch"]
+    punch = sweep(jit(f0, 0.05), f1, jit(tau, 0.05), d)
+    blast = hi * jit(p["hi"], 0.12) + mid * jit(0.9, 0.12) + low * jit(0.8, 0.12)
+    x = mix(d, (0, click), (0, crack, jit(p["crack"], 0.1) * 1.6), (0, blast), (0, punch, p["punch_gain"]))
+    # Ground bounce: the blast again a few milliseconds later, duller. This is what says "outdoors".
+    place(x, filt(blast, "low", 2400), jit(0.0065, 0.2), 0.3)
+    if gun == "m4":
+        # Carrier hits the back of the receiver extension, the buffer spring sings, it runs home
+        place(x, impact("steel_heavy", 0.3, bright=1.2, d=0.08, damp=0.5, body=0.4), jit(0.031, 0.06))
+        place(x, nband(0.09, 800, 1500) * env(0.09, 0.01, 0.022), 0.034, 0.1)
+        place(x, impact("steel", 0.22, bright=1.4, d=0.08, damp=0.5), jit(0.066, 0.04))
+    elif gun == "pistol":
+        place(x, impact("steel", 0.34, bright=1.5, d=0.07, damp=0.5), jit(0.021, 0.08))
+        place(x, impact("steel", 0.3, bright=1.7, d=0.08, damp=0.6, body=0.2), jit(0.056, 0.05))
+    else:
+        # No action noise: the stock and barrel ring instead
+        place(x, modal("wood", 0.2) * env(0.2, 0.002, 1.0), 0.002, 0.3)
+        place(x, modal("steel_heavy", 0.25, damp=1.4) * env(0.25, 0.002, 1.0), 0.003, 0.08)
+    return level(filt(x, "high", 28), p["rms"])
+
+
+def shot_tail(gun):
+    p = GUNS[gun]
+    x = np.stack([echoes(p["tail_d"], p["tail_bright"], p["size"]) for _ in range(2)], axis=1)
+    return sosfilt(butter(2, 5000, btype="low", fs=SR, output="sos"), x, axis=0)
+
+
+def shot_far(gun):
+    """From across the compound the crack is gone: a boom, a muffled pop and the walls answering."""
+    p = GUNS[gun]
+    d = p["tail_d"] + 0.2
+    f0, f1, tau = p["punch"]
+    boom = sweep(f0 * 0.75, f1, tau * 2.6, 0.5, attack=0.004)
+    pop = nband(0.4, 150, 900) * env(0.4, 0.003, p["mid_tau"] * 2.6)
+    x = mix(d, (0, boom, 1.5), (0, pop, 1.0), (0, echoes(d, 1300, p["size"], sub=0.7), 0.55))
+    return filt(x, "low", 1250, 4)
+
+
+def gunshots():
+    for gun, p in GUNS.items():
+        for i in range(p["shots"]):
+            write(f"{gun}_shot_{i}.wav", shot_close(gun), norm=False)
+        for i in range(p["tails"]):
+            write(f"{gun}_tail_{i}.wav", shot_tail(gun), 0.85, drive=1.4, sr=LOW_SR)
+            write(f"{gun}_far_{i}.wav", shot_far(gun), 0.9, drive=1.3, sr=LOW_SR)
+
+
+def explosions():
+    for i in range(2):
+        d = 2.8
+        crack = filt(noise(0.05), "high", 1400) * env(0.05, 0.0001, 0.004)
+        blast = mix(1.6,
+                    (0, nband(0.4, 2000, 8000) * env(0.4, 0.0003, jit(0.024)), 0.7),
+                    (0, nband(0.9, 300, 2000) * env(0.9, 0.0005, jit(0.085))),
+                    (0, nband(1.6, 60, 300) * env(1.6, 0.002, jit(0.22)), 1.1))
+        sub = sweep(jit(78, 0.05), 26, 0.4, 1.8, attack=0.002)
+        # Dirt and grit thrown up, raining back down over the next second
+        debris = crunch(1.3, 260, 0.5, 700, 6000) + nband(1.31, 400, 3000) * env(1.31, 0.15, 0.35) * 0.06
+        x = mix(d, (0, crack, 2.0), (0, blast), (0, sub, 1.7), (0.16, debris),
+                (0, echoes(d, 1800, 2.2, sub=0.8), 0.5))
+        write(f"explosion_{i}.wav", level(filt(x, "high", 22), 0.42, win=0.3), norm=False)
+    d = 3.0
+    x = mix(d, (0, sweep(60, 26, 0.5, 1.6, attack=0.006), 1.6), (0, nband(1.0, 80, 600) * env(1.0, 0.004, 0.16)),
+            (0, echoes(d, 1100, 2.4, sub=0.8), 0.6))
+    write("explosion_far_0.wav", filt(x, "low", 900, 4), 0.9, drive=1.4, sr=LOW_SR)
 
 
 # ---------------------------------------------------------------------------------------------
-# Weapon handling
+# Weapon handling: one file per motion, so the timelines can place each where the hands do it
 
 def dry_fire():
     # Trigger slack, then the hammer falling on an empty chamber: small, hard, metallic
     x = mix(0.25,
             (0, scrape(0.018, 2000, 6000, 0.08)),
             (0.02, impact("steel", 1.0, bright=1.6, d=0.2, damp=0.7)),
-            (0.02, impact("polymer", 0.35, d=0.08)))
+            (0.02, impact("polymer", 0.35, d=0.08)),
+            (0.021, thump(320, 180, 0.03, 0.25)))
     write("dry_fire.wav", x, 0.7)
 
 
+def cloth_set():
+    # Glove and sleeve leaving the gun: a short rustle, each one a different length and colour
+    for i, (d, lo, hi) in enumerate([(0.15, 800, 5200), (0.2, 600, 4200), (0.17, 1000, 6000)]):
+        x = mix(d + 0.03, (0, cloth(d, 1.0, lo, hi)), (rng.uniform(0.02, 0.05), palm(0.18, 800, 0.006)))
+        write(f"cloth_{i}.wav", x, 0.6)
+
+
+def grip_set():
+    # The hand settling back on the gun: a gloved pat on polymer, a little fabric
+    for i in range(2):
+        x = mix(0.2,
+                (0, cloth(0.07, 0.25)),
+                (0.03, palm(1.0, jit(1000, 0.2))),
+                (0.031, impact("polymer", 0.3, d=0.06)),
+                (0.05, rattle(0.04, 2, "steel", 0.12)))
+        write(f"grip_{i}.wav", x, 0.7)
+
+
+def rattle_set():
+    # The weapon turned over in the hands: sling hardware, the magazine and stock shifting
+    for i in range(3):
+        x = mix(0.34,
+                (0, cloth(0.2, 0.3)),
+                (0.02, rattle(0.14, 3 + i, "steel", 0.55)),
+                (0.04, rattle(0.12, 2, "aluminium", 0.5)),
+                (rng.uniform(0.1, 0.16), impact("polymer", 0.35, d=0.07)))
+        write(f"rattle_{i}.wav", x, 0.6)
+
+
+def ads_set():
+    # Rifle coming up to the eye: sleeve, cheek on the stock, hardware barely moving
+    for i in range(2):
+        x = mix(0.2,
+                (0, cloth(0.14, 0.9, 600, 3800)),
+                (0.07, palm(0.4, 700)),
+                (rng.uniform(0.05, 0.09), rattle(0.04, 2, "steel", 0.12)))
+        write(f"ads_{i}.wav", x, 0.5)
+
+
+def mag_release():
+    # Thumb on the catch: one small steel click, and the button springing back
+    x = mix(0.12,
+            (0, impact("steel", 0.9, bright=1.5, d=0.08, damp=0.4)),
+            (0.001, impact("polymer", 0.4, d=0.05)),
+            (0.014, impact("steel", 0.3, bright=1.7, d=0.05, damp=0.3)))
+    write("mag_release.wav", x, 0.7)
+
+
 def mag_out():
-    # Thumb presses the release (click), the mag drops out of the well along its rails
-    x = mix(0.4,
-            (0, impact("steel", 0.6, bright=1.4, d=0.12, damp=0.6)),
-            (0.025, scrape(0.11, 900, 4200, 0.45, grit=300)),
-            (0.03, impact("aluminium", 0.55, d=0.2, body=0.35)),
-            (0.06, rattle(0.12, 5, "brass", 0.5)),
-            (0.14, impact("polymer", 0.3, d=0.08)))
+    # The magazine drawn down its rails, rounds shifting, then clearing the well with a hollow pop
+    x = mix(0.34,
+            (0, scrape(0.12, 900, 4200, 0.6, grit=300, attack=0.012)),
+            (0.01, impact("aluminium", 0.4, d=0.15, body=0.3)),
+            (0.03, rattle(0.1, 5, "brass", 0.45)),
+            (0.118, impact("aluminium", 0.6, d=0.2, body=0.5)),
+            (0.12, impact("polymer", 0.45, d=0.08)),
+            (0.12, thump(260, 140, 0.04, 0.3)))
     write("mag_out.wav", x)
 
 
+def mag_insert():
+    # The fresh magazine finds the well (a tick on the lip) and slides up, rounds rattling
+    x = mix(0.2,
+            (0, impact("aluminium", 0.55, bright=1.2, d=0.1, damp=0.6)),
+            (0.004, impact("polymer", 0.3, d=0.05)),
+            (0.03, scrape(0.125, 800, 3800, 0.6, grit=260, attack=0.06)),
+            (0.04, rattle(0.09, 4, "brass", 0.3)))
+    write("mag_insert.wav", x, 0.7)
+
+
 def mag_in():
-    # Rounds rattle, the mag slides up the well and the catch snaps into its notch
-    x = mix(0.45,
-            (0, rattle(0.06, 3, "brass", 0.35)),
-            (0.02, scrape(0.09, 800, 3800, 0.55, grit=260, attack=0.02)),
-            (0.115, impact("aluminium", 1.0, bright=1.1, d=0.3, body=0.9)),
-            (0.118, impact("steel", 0.75, bright=1.5, d=0.25)),
-            (0.12, thump(240, 120, 0.06, 0.5)),
-            (0.16, rattle(0.08, 4, "brass", 0.3)))
+    # Seated with a slap on the baseplate: the catch snaps into its notch and the receiver rings
+    x = mix(0.34,
+            (0, impact("aluminium", 1.0, bright=1.1, d=0.3, body=0.9)),
+            (0.002, impact("steel", 0.8, bright=1.5, d=0.25)),
+            (0, palm(0.9)),
+            (0.003, thump(240, 120, 0.06, 0.6)),
+            (0.035, rattle(0.08, 4, "brass", 0.3)))
     write("mag_in.wav", x)
+
+
+def bolt_release():
+    # Palm slapped onto the bolt catch: flesh on the receiver and the lever tripping
+    x = mix(0.14,
+            (0, palm(1.0, 1400, 0.007)),
+            (0.003, impact("steel", 0.6, bright=1.4, d=0.1, damp=0.5)),
+            (0.004, impact("aluminium", 0.35, d=0.1, body=0.3)))
+    write("bolt_release.wav", x, 0.8)
 
 
 def charge_back():
@@ -226,47 +475,120 @@ def charge_back():
 
 
 def charge_fwd():
-    # Released: the bolt carrier slams home, strips a round and locks; the whole rifle rings
+    # Bolt carrier driven home by the buffer spring: a short run, then it strips a round, slams
+    # into battery and the whole rifle rings; the spring twangs in the stock afterwards
+    twang = (np.sin(2 * np.pi * 640 * time(0.25)) + 0.6 * np.sin(2 * np.pi * 1130 * time(0.25))) * env(0.25, 0.004, 0.06)
     x = mix(0.5,
-            (0, scrape(0.035, 1500, 7000, 0.4, grit=500, attack=0.003)),
-            (0.035, impact("steel_heavy", 1.0, bright=1.3, d=0.4, body=1.0)),
-            (0.036, impact("steel", 0.8, bright=1.6, d=0.3)),
-            (0.037, thump(210, 90, 0.08, 0.7)),
-            (0.06, rattle(0.1, 4, "steel", 0.35)),
-            (0.12, impact("polymer", 0.25, d=0.06)))
-    write("charge_fwd.wav", x)
+            (0, scrape(0.03, 1500, 7000, 0.45, grit=500, attack=0.003)),
+            (0.03, impact("steel_heavy", 1.0, bright=1.3, d=0.4, body=1.0)),
+            (0.031, impact("steel", 0.8, bright=1.6, d=0.3)),
+            (0.031, thump(210, 90, 0.08, 0.8)),
+            (0.033, twang, 0.14),
+            (0.05, rattle(0.1, 4, "steel", 0.35)),
+            (0.11, impact("polymer", 0.25, d=0.06)))
+    write("charge_fwd.wav", x, 0.95, drive=1.5)
+
+
+def slide_back():
+    # Overhand grab and pull against the recoil spring until the slide stops
+    t_ = 0.065
+    spring = filt(noise(t_), "band", (2200, 8000)) * np.linspace(0.2, 1, n_(t_)) * 0.3
+    x = mix(0.2,
+            (0, palm(0.35, 1500, 0.004)),
+            (0.004, scrape(t_, 1800, 7500, 0.55, grit=600, attack=0.015)),
+            (0.004, spring),
+            (0.07, impact("steel", 0.7, bright=1.5, d=0.12, damp=0.6)),
+            (0.071, impact("polymer", 0.3, d=0.05)))
+    write("slide_back.wav", x, 0.75)
 
 
 def slide():
-    # Pistol slide released: snaps forward, locks with a sharp steel clack
-    x = mix(0.4,
-            (0, impact("steel", 0.4, bright=1.3, d=0.08, damp=0.6)),
-            (0.008, scrape(0.03, 1800, 7500, 0.35, grit=600, attack=0.003)),
-            (0.04, impact("steel", 1.0, bright=1.7, d=0.3)),
-            (0.041, impact("steel_heavy", 0.5, d=0.25, body=0.4)),
-            (0.075, rattle(0.06, 3, "steel", 0.25)))
-    write("slide.wav", x)
+    # Pistol slide let go: snaps forward, strips a round and locks with a sharp steel clack
+    x = mix(0.36,
+            (0, scrape(0.022, 1800, 7500, 0.4, grit=600, attack=0.003)),
+            (0.023, impact("steel", 1.0, bright=1.7, d=0.3)),
+            (0.024, impact("steel_heavy", 0.55, d=0.25, body=0.4)),
+            (0.024, thump(300, 150, 0.04, 0.4)),
+            (0.055, rattle(0.06, 3, "steel", 0.25)))
+    write("slide.wav", x, 0.9, drive=1.3)
 
 
-def bolt():
-    # Bolt-action: handle lifts (cam click), bolt draws back on its raceway, case is extracted
-    x = mix(0.55,
-            (0, impact("steel", 0.6, bright=1.2, d=0.12, damp=0.7)),
-            (0.03, impact("steel_heavy", 0.45, d=0.15)),
-            (0.07, scrape(0.16, 900, 5500, 0.55, grit=320, attack=0.03)),
-            (0.23, impact("steel_heavy", 0.7, d=0.25, body=0.5)),
-            (0.25, impact("brass", 0.6, bright=1.4, d=0.2)),
-            (0.3, rattle(0.08, 3, "brass", 0.3)))
-    write("bolt.wav", x)
+def pistol_mags():
+    # Steel magazine in a polymer grip: quicker, thinner and drier than the rifle's
+    out = mix(0.22,
+              (0, scrape(0.055, 1400, 6500, 0.6, grit=500, attack=0.006)),
+              (0.004, impact("steel", 0.35, bright=1.3, d=0.08, damp=0.5)),
+              (0.055, impact("polymer", 0.6, d=0.08)),
+              (0.056, thump(380, 200, 0.03, 0.3)),
+              (0.03, rattle(0.05, 2, "brass", 0.25)))
+    write("pistol_mag_out.wav", out, 0.8)
+    ins = mix(0.2,
+              (0, impact("steel", 0.5, bright=1.4, d=0.08, damp=0.5)),
+              (0.003, impact("polymer", 0.4, d=0.05)),
+              (0.03, scrape(0.11, 1400, 6000, 0.55, grit=420, attack=0.05)))
+    write("pistol_mag_insert.wav", ins, 0.65)
+    seat = mix(0.28,
+               (0, impact("steel", 0.9, bright=1.5, d=0.2, damp=0.8)),
+               (0.001, impact("polymer", 0.9, d=0.1)),
+               (0, palm(0.8, 1300)),
+               (0.002, thump(330, 170, 0.04, 0.5)),
+               (0.03, rattle(0.05, 2, "brass", 0.2)))
+    write("pistol_mag_in.wav", seat, 0.85)
+
+
+def bolt_action():
+    # Handle lifted: the cocking cam clicks as it starts and knocks at the top of its turn
+    up = mix(0.2,
+             (0, impact("steel", 0.7, bright=1.2, d=0.12, damp=0.7)),
+             (0.01, scrape(0.06, 1500, 6000, 0.25, grit=400)),
+             (0.075, impact("steel_heavy", 0.6, d=0.15, damp=0.8)),
+             (0.076, impact("wood", 0.5, d=0.08)))
+    write("bolt_up.wav", up, 0.75)
+    # Drawn back along its raceway until the bolt stop; the case comes out with it
+    back = mix(0.42,
+               (0, scrape(0.14, 900, 5500, 0.6, grit=320, attack=0.03)),
+               (0.14, impact("steel_heavy", 0.8, d=0.25, body=0.5)),
+               (0.15, impact("brass", 0.5, bright=1.4, d=0.2)),
+               (0.19, rattle(0.07, 3, "brass", 0.25)))
+    write("bolt.wav", back)
+    # Pushed forward: picks a round off the magazine and runs it into the chamber
+    fwd = mix(0.3,
+              (0, impact("brass", 0.35, bright=1.3, d=0.08)),
+              (0.005, scrape(0.085, 1000, 6000, 0.65, grit=380, attack=0.03)),
+              (0.09, impact("steel_heavy", 0.85, d=0.2, body=0.5)),
+              (0.092, impact("wood", 0.5, d=0.1)))
+    write("bolt_fwd.wav", fwd, 0.85)
+    # Handle turned down: the lugs cam into the receiver and the knob lands on the stock
+    lock = mix(0.3,
+               (0, scrape(0.035, 1500, 6500, 0.3, grit=450, attack=0.005)),
+               (0.038, impact("steel_heavy", 1.0, bright=1.2, d=0.25, body=0.6)),
+               (0.039, impact("steel", 0.5, bright=1.4, d=0.15)),
+               (0.04, impact("wood", 0.9, d=0.12)),
+               (0.04, thump(230, 110, 0.05, 0.5)))
+    write("sniper_charge_fwd.wav", lock, 0.9)
 
 
 def round_in():
-    x = mix(0.3,
-            (0, scrape(0.05, 2500, 8000, 0.35, grit=500, attack=0.01)),
-            (0.045, impact("brass", 0.9, bright=1.3, d=0.2)),
-            (0.047, impact("steel", 0.45, d=0.15)),
-            (0.05, rattle(0.05, 2, "brass", 0.25)))
+    # A cartridge laid on the follower and thumbed down until it snaps under the feed lips
+    x = mix(0.26,
+            (0, impact("brass", 0.5, bright=1.3, d=0.1)),
+            (0.008, scrape(0.03, 2500, 8000, 0.4, grit=500, attack=0.01)),
+            (0.032, impact("brass", 0.9, bright=1.3, d=0.2)),
+            (0.034, impact("steel", 0.5, d=0.15)),
+            (0.034, thump(300, 170, 0.03, 0.3)),
+            (0.045, rattle(0.05, 2, "brass", 0.25)))
     write("round_in.wav", x)
+
+
+def pouch():
+    # Old magazine away, new one out: a flap ripped open, fabric, magazines knocking together
+    x = mix(0.4,
+            (0, crunch(0.09, 900, 0.5, 2500, 9000)),
+            (0.03, cloth(0.3, 1.0, 500, 4200)),
+            (0.16, impact("aluminium", 0.3, d=0.12, damp=0.5)),
+            (0.19, rattle(0.08, 3, "brass", 0.3)),
+            (0.25, impact("polymer", 0.3, d=0.06)))
+    write("pouch.wav", x, 0.6)
 
 
 def mag_drop():
@@ -291,28 +613,66 @@ def holster():
     write("holster.wav", x, 0.6)
 
 
-def casing(name, material="brass"):
-    # Spent case tinkling on hard ground (two bounces)
-    x = mix(0.5,
-            (0, impact(material, 1.0, bright=1.4, d=0.3, damp=1.2)),
-            (0.09, impact(material, 0.45, bright=1.4, d=0.25)),
-            (0.16, impact(material, 0.2, bright=1.4, d=0.2)))
-    write(name, x, 0.6)
+def raise_stow():
+    # Weapon coming up into the hands: the grip caught, hardware settling, stock into the shoulder
+    up = mix(0.36,
+             (0, cloth(0.16, 0.5)),
+             (0.02, palm(0.9, 1000)),
+             (0.025, impact("polymer", 0.5, d=0.08)),
+             (0.04, rattle(0.12, 4, "steel", 0.45)),
+             (0.15, thump(150, 80, 0.07, 0.6)),
+             (0.15, filt(noise(0.05), "low", 600) * env(0.05, 0.003, 0.012), 0.6))
+    write("raise.wav", up, 0.7)
+    # Lowered out of the way: quick fabric and a knock against the kit
+    down = mix(0.26,
+               (0, cloth(0.2, 0.9, 500, 4000)),
+               (0.05, rattle(0.07, 2, "steel", 0.3)),
+               (0.13, impact("polymer", 0.35, d=0.07)),
+               (0.13, thump(170, 90, 0.05, 0.4)))
+    write("stow.wav", down, 0.6)
+
+
+def pickups():
+    # Ammo scooped up: rounds chattering in a magazine as it goes into a pouch
+    ammo = mix(0.42,
+               (0, cloth(0.22, 0.6)),
+               (0.03, rattle(0.16, 7, "brass", 0.6)),
+               (0.06, impact("aluminium", 0.5, d=0.15, damp=0.6)),
+               (0.2, impact("aluminium", 0.7, d=0.15, damp=0.6, body=0.3)),
+               (0.21, impact("polymer", 0.4, d=0.07)))
+    write("pickup_ammo.wav", ammo, 0.7)
+    # A weapon lifted off the ground: sling and swivels, then its weight landing in the hands
+    gun = mix(0.5,
+              (0, cloth(0.28, 0.7)),
+              (0.02, rattle(0.18, 5, "steel", 0.6)),
+              (0.08, impact("steel_heavy", 0.4, d=0.15, damp=0.6)),
+              (0.24, palm(1.0, 900)),
+              (0.245, impact("polymer", 0.6, d=0.09)),
+              (0.25, impact("steel_heavy", 0.35, d=0.2, body=0.5)))
+    write("pickup_weapon.wav", gun, 0.7)
+
+
+def casings():
+    for i in range(3):
+        # Spent case tinkling on hard ground: three bounces, each closer and quieter
+        b1 = rng.uniform(0.07, 0.11)
+        b2 = b1 + rng.uniform(0.05, 0.08)
+        x = mix(0.5,
+                (0, impact("brass", 1.0, bright=1.4, d=0.3, damp=1.2)),
+                (b1, impact("brass", 0.45, bright=1.4, d=0.25)),
+                (b2, impact("brass", 0.2, bright=1.4, d=0.2)))
+        write(f"casing_hard_{i}.wav", x, 0.6)
+        # On dirt it barely rings: a dull tick and a few grains kicked loose
+        x = mix(0.3,
+                (0, impact("brass", 0.7, bright=1.0, d=0.1, damp=0.3)),
+                (0, filt(noise(0.03), "low", 900) * env(0.03, 0.001, 0.007), 0.5),
+                (0.003, crunch(0.06, 400, 0.3)),
+                (rng.uniform(0.07, 0.1), impact("brass", 0.18, bright=1.0, d=0.06, damp=0.25)))
+        write(f"casing_dirt_{i}.wav", x, 0.5)
 
 
 # ---------------------------------------------------------------------------------------------
 # Footsteps
-
-def crunch(d, density, gain, lo=1500, hi=9000):
-    """Granular gravel: lots of tiny grain impacts, front-loaded."""
-    x = silence(d + 0.01)
-    count = int(density * d)
-    for _ in range(count):
-        at = (rng.uniform(0, 1) ** 1.8) * d
-        g = filt(noise(0.004), "band", (lo, hi)) * env(0.004, 0.0002, rng.uniform(0.0004, 0.0012))
-        place(x, g, at, rng.uniform(0.2, 1.0) * (1 - at / d) ** 0.7)
-    return x * gain
-
 
 def footstep_dirt(i):
     heel = filt(noise(0.05), "low", 380) * env(0.05, 0.002, 0.012)
@@ -343,63 +703,150 @@ def footstep_hard(i):
 
 
 # ---------------------------------------------------------------------------------------------
-# Impacts and the rest
+# Bullets arriving, bodies, UI, ambience
 
 def impacts():
-    x = mix(0.35,
-            (0, filt(noise(0.01), "high", 2500) * env(0.01, 0.0001, 0.002), 1.0),
-            (0, filt(noise(0.2), "band", (400, 3500)) * env(0.2, 0.001, 0.03), 0.6),
-            (0.005, crunch(0.12, 500, 0.4, 1200, 8000)))
-    write("impact.wav", x, 0.7)
-    flesh = mix(0.25,
-                (0, filt(noise(0.06), "low", 1600) * env(0.06, 0.001, 0.012), 1.0),
-                (0, thump(95, 50, 0.08, 0.8)),
-                (0.01, filt(noise(0.12), "band", (200, 900)) * env(0.12, 0.003, 0.03), 0.5))
-    write("flesh.wav", flesh, 0.7)
+    for i in range(3):
+        # Concrete, brick, steel: a hard crack, chips flying, a short ring from the wall
+        x = mix(0.34,
+                (0, filt(noise(0.012), "high", jit(2400)) * env(0.012, 0.0001, 0.002), 1.2),
+                (0, nband(0.2, 500, 4000) * env(0.2, 0.0006, jit(0.022)), 0.5),
+                (0, thump(jit(190), 90, 0.05, 0.5)),
+                (0.001, modal("steel_heavy", 0.1, detune=0.2, damp=0.25), 0.12),
+                (0.006, crunch(0.14, 480, 0.4, 1500, 9000)))
+        write(f"impact_hard_{i}.wav", x, 0.8)
+        # Dirt: a thud that swallows the round and a spray of soil
+        x = mix(0.36,
+                (0, filt(noise(0.08), "low", jit(900)) * env(0.08, 0.0008, 0.018), 1.3),
+                (0, thump(jit(130), 55, 0.08, 0.9)),
+                (0.004, nband(0.2, 400, 2600) * env(0.2, 0.01, 0.045), 0.16),
+                (0.01, crunch(0.2, 380, 0.3, 700, 4500)))
+        write(f"impact_dirt_{i}.wav", x, 0.8)
+        # Ricochet: the hit, then the deformed bullet whining away, tumbling as it slows
+        d = 0.6
+        t = time(d)
+        f0 = rng.uniform(2600, 4600)
+        f = f0 * (0.45 + 0.55 * np.exp(-t / rng.uniform(0.08, 0.16)))
+        ph = 2 * np.pi * np.cumsum(f) / SR
+        tumble = 1 + 0.55 * np.sin(2 * np.pi * rng.uniform(50, 110) * t * (1 - 0.5 * t / d))
+        whine = (np.sin(ph) + 0.35 * np.sin(2.01 * ph) + nband(d, 1500, 7000) * 0.3) * tumble * env(d, 0.004, rng.uniform(0.1, 0.17))
+        x = mix(d,
+                (0, filt(noise(0.01), "high", 2800) * env(0.01, 0.0001, 0.0018), 1.4),
+                (0, modal("steel", 0.1, detune=0.15, damp=0.4), 0.2),
+                (0.004, whine, 0.45))
+        write(f"ricochet_{i}.wav", x, 0.7)
+    for i in range(3):
+        # Round into a body: a dull, wet slap with weight behind it
+        x = mix(0.26,
+                (0, filt(noise(0.06), "low", jit(1600)) * env(0.06, 0.001, 0.012), 1.0),
+                (0, thump(jit(95), 50, 0.08, 0.8)),
+                (0.002, nband(0.03, 1000, 4500) * env(0.03, 0.0005, 0.005), 0.2),
+                (0.01, filt(noise(0.12), "band", (200, 900)) * env(0.12, 0.003, 0.03), 0.5),
+                (0.015, cloth(0.06, 0.25)))
+        write(f"flesh_{i}.wav", x, 0.75)
 
 
-def whiz():
-    d = 0.3
-    t = time(d)
-    x = filt(noise(d), "band", (1200, 7000), 2)
-    # Doppler-ish sweep: band moves down as the round passes
-    sweep = filt(noise(d), "band", (600, 2400), 2)
-    shape = np.exp(-((t - 0.09) / 0.045) ** 2)
-    crack = filt(noise(0.006), "high", 3000) * env(0.006, 0.0001, 0.0012)
-    out = (x * 0.6 + sweep * 0.5) * shape
-    place(out, crack, 0.085, 0.8)
-    write("whiz.wav", out, 0.75)
+def whizzes():
+    for i in range(4):
+        d = 0.3
+        t = time(d)
+        at = 0.085
+        air = filt(noise(d), "band", (jit(1200, 0.15), jit(7000, 0.15)), 2)
+        # Doppler-ish sweep: band moves down as the round passes
+        low = filt(noise(d), "band", (jit(600, 0.15), jit(2400, 0.15)), 2)
+        shape = np.exp(-((t - at) / jit(0.045, 0.2)) ** 2)
+        tilt = np.clip((t - at) / 0.1 + 0.5, 0, 1)
+        out = (air * 0.6 * (1 - tilt * 0.6) + low * 0.5 * (0.5 + tilt)) * shape
+        if i < 2:
+            # Supersonic and close: the bullet's own crack leads the hiss
+            place(out, filt(noise(0.006), "high", 3000) * env(0.006, 0.0001, 0.0012), at, 1.0)
+        write(f"whiz_{i}.wav", out, 0.75)
 
 
-def hitmarker():
-    x = impact("steel", 1.0, bright=1.8, d=0.12, damp=0.5)
-    write("hitmarker.wav", x, 0.5)
+def hurts():
+    for i in range(2):
+        # Hit taken: the thud through the plate carrier and the kit jolting
+        x = mix(0.4,
+                (0, filt(noise(0.1), "low", jit(520)) * env(0.1, 0.001, 0.03), 1.2),
+                (0, sweep(jit(85), 40, 0.09, 0.3), 1.2),
+                (0.002, impact("polymer", 0.9, d=0.08)),
+                (0.004, nband(0.08, 400, 2200) * env(0.08, 0.001, 0.016), 0.9),
+                (0.03, cloth(0.14, 0.2)),
+                (0.05, rattle(0.08, 3, "steel", 0.12)))
+        write(f"hurt_{i}.wav", x, 0.85, drive=1.6)
+
+
+def ui():
+    # Hit confirm: a dry tick. The headshot is higher and doubled, the kill has a low knock under it.
+    write("hitmarker.wav", impact("steel", 1.0, bright=1.8, d=0.1, damp=0.35), 0.5)
+    head = mix(0.14, (0, impact("brass", 1.0, bright=1.9, d=0.1, damp=0.6)), (0.035, impact("brass", 0.6, bright=2.0, d=0.08, damp=0.5)))
+    write("hitmarker_head.wav", head, 0.5)
+    kill = mix(0.2, (0, impact("wood", 1.0, d=0.12)), (0, thump(220, 120, 0.06, 0.8)), (0.001, impact("steel", 0.3, bright=1.6, d=0.08, damp=0.4)))
+    write("hit_kill.wav", kill, 0.6)
+
+
+def wind():
+    """Open-air bed: gusting mid-band wind, a little hiss in the gusts, a low rumble. Loops."""
+    D, X, lead = 8.0, 2.0, 1.0
+    total = D + X + lead
+
+    def gusts():
+        knots = np.arange(0, total + 1.5, 0.75)
+        return CubicSpline(knots, rng.uniform(0.4, 1.0, len(knots)))(time(total))
+
+    def chan(g):
+        # Mostly the shared gusts (wind is one air mass) with a little of this ear's own
+        g = np.clip(0.8 * g + 0.2 * gusts(), 0.25, 1.1)
+        x = nband(total, 110, 650, 1) * g + nband(total, 900, 3600, 1) * g ** 3 * 0.22 + nband(total, 30, 110) * 0.45
+        x = x[n_(lead):]
+        k, m = n_(D), n_(X)
+        r = np.linspace(0, np.pi / 2, m)
+        y = x[:k].copy()
+        # The lap's first seconds are blended with what would have followed its end
+        y[:m] = x[:m] * np.sin(r) + x[k:k + m] * np.cos(r)
+        return y
+
+    shared = gusts()
+    write("amb_wind.wav", np.stack([chan(shared), chan(shared)], axis=1), 0.6, drive=0.8, sr=16000, loop=True)
 
 
 if __name__ == "__main__":
-    gunshot("m4_shot.wav", 1.2, "steel_heavy", 0.01)
-    gunshot("pistol_shot.wav", 0.95, "steel", 0.008)
-    gunshot("sniper_shot.wav", 1.8, "steel_heavy", 0.02)
+    gunshots()
+    explosions()
     dry_fire()
+    cloth_set()
+    grip_set()
+    rattle_set()
+    ads_set()
+    mag_release()
     mag_out()
+    mag_insert()
     mag_in()
+    bolt_release()
     charge_back()
     charge_fwd()
+    slide_back()
     slide()
-    bolt()
+    pistol_mags()
+    bolt_action()
     round_in()
+    pouch()
     mag_drop()
     holster()
-    casing("casing_0.wav")
-    casing("casing_1.wav")
-    casing("casing_2.wav")
+    raise_stow()
+    pickups()
+    casings()
     for i in range(6):
         footstep_dirt(i)
         footstep_hard(i)
     impacts()
-    whiz()
-    hitmarker()
-    old = os.path.join(OUT, "footstep.wav")
-    if os.path.exists(old):
-        os.remove(old)
-    print("sounds written to", os.path.normpath(OUT))
+    whizzes()
+    hurts()
+    ui()
+    wind()
+    # Files from an older version of this script would otherwise ship as dead weight
+    for f in os.listdir(OUT):
+        if f.endswith(".wav") and f not in written:
+            os.remove(os.path.join(OUT, f))
+    total = sum(os.path.getsize(os.path.join(OUT, f)) for f in written)
+    print(f"{len(written)} sounds ({total / 1e6:.1f} MB) written to {os.path.normpath(OUT)}")

@@ -16,7 +16,7 @@ export class Input {
       if (!this.locked) return;
       if (!e.repeat) this.pressed.add(e.code);
       this.keys.add(e.code);
-      if (['Space', 'Tab', 'F3', 'KeyF'].includes(e.code)) e.preventDefault();
+      if (['Space', 'Tab', 'F3', 'KeyF', 'KeyE'].includes(e.code)) e.preventDefault();
     });
     window.addEventListener('keyup', (e) => this.keys.delete(e.code));
     window.addEventListener('mousemove', (e) => {

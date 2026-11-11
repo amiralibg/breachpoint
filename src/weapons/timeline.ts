@@ -6,7 +6,8 @@
  *   <part> / <part>_rot offset of a movable part (magazine, bolt, slide...) in view space
  * Events fire once as playback crosses their time: "ammo" grants rounds, "ready" ends the action,
  * "drop:<part>" spawns a physical copy of that part, anything else is a sound name.
- * `hands` switches the left hand between anchors ("grip", "mag", "handle"...), blended over ~0.12 s.
+ * `hands` / `rhands` move a hand between anchors ("guard", "mag", "bolt"...): it lifts off, travels
+ * and closes on the new grip over the move time.
  */
 
 export type V3 = [number, number, number];
@@ -21,11 +22,13 @@ export interface Timeline {
   show?: Record<string, [number, number]>;
   /** Parts that are hidden within [from, to). */
   hide?: Record<string, [number, number]>;
-  /** Left-hand anchor changes: [time, anchor]. */
-  hands?: [number, string][];
+  /** Left-hand anchor changes: [time, anchor, seconds the move takes (default 0.2)]. */
+  hands?: HandKey[];
   /** Right-hand anchor changes (bolt work, round loading). */
-  rhands?: [number, string][];
+  rhands?: HandKey[];
 }
+
+export type HandKey = [t: number, anchor: string, move?: number];
 
 export const Z: V3 = [0, 0, 0];
 
@@ -132,14 +135,14 @@ export class TimelinePlayer {
     if (!hands || hands.length === 0) return [rest, rest, 1];
     let prev = rest;
     let cur = rest;
-    let since = Infinity;
-    for (const [ht, a] of hands) {
+    let u = 1;
+    for (const [ht, a, move = 0.2] of hands) {
       if (this.t >= ht) {
         prev = cur;
         cur = a;
-        since = this.t - ht;
+        u = Math.min(1, (this.t - ht) / move);
       }
     }
-    return [prev, cur, Math.min(1, since / 0.12)];
+    return [prev, cur, u];
   }
 }
