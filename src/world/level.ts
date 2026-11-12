@@ -1,10 +1,11 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { loadModel, loadPbr, pbrMaterial } from '../core/assets';
+import { loadPbr, pbrMaterial } from '../core/assets';
 import type { Audio } from '../core/audio';
 import type { QualityPreset } from '../core/settings';
 import { collidersChanged, raycastBoxes } from './physics';
 import { installSunFog, makeSky, type SkySpec } from './sky';
+import { buildProps, propBaseBox, releaseTextures, SHADOW_LAYER, type PropId } from './props';
 
 /**
  * Level kit for the story maps. A map is built from axis-aligned boxes (slabs, walls with door
@@ -42,29 +43,7 @@ const TEX = {
 export type TexName = keyof typeof TEX;
 const METALS = new Set<TexName>(['steel', 'rust', 'iron', 'blue', 'green']);
 
-export type PropId = 'wooden_crate_01' | 'wooden_crate_02' | 'old_military_crate' | 'wooden_military_crate' | 'Barrel_01'
-  | 'barrel_03' | 'concrete_road_barrier' | 'concrete_road_barrier_02' | 'utility_box_01' | 'plastic_crate_01' | 'ammo_box' | 'covered_car'
-  | DressProp;
-
-/** Set dressing (Poly Haven, CC0). Every map can use these without asking for them. */
-export const DRESS_PROPS = [
-  'metal_trash_can', 'trashbag', 'old_tyre', 'exterior_aircon_unit', 'utility_box_02', 'security_light', 'cardboard_box_01',
-  'plastic_crate_03', 'metal_jerrycan', 'propane_tank', 'portable_generator', 'hand_truck', 'steel_frame_shelves_01',
-  'metal_office_desk', 'metal_stool_01', 'korean_fire_extinguisher_01', 'WetFloorSign_01', 'cement_bag', 'lifebuoy',
-  'plastic_monobloc_chair_01', 'worn_metal_rack', 'tool_cart', 'portable_searchlight', 'Television_01', 'classic_laptop',
-  'mounted_fluorescent_lights', 'industrial_wall_lamp', 'water_manhole_cover', 'rusted_wheel_rim_01', 'Barrel_02',
-  'metal_toolbox', 'small_lpg_tank', 'painted_wooden_shelves', 'wooden_ladder', 'hanging_industrial_lamp',
-  'rollershutter_door', 'rollershutter_window_01', 'medical_box', 'clipboard', 'office_notepads', 'binder_notebook',
-] as const;
-export type DressProp = (typeof DRESS_PROPS)[number];
-
-/** Props whose files are not at real-world scale (or read wrong at it), corrected once at load. */
-const PROP_SCALE: Partial<Record<PropId, number>> = {
-  steel_frame_shelves_01: 1.9 / 21.41, // modelled in the wrong unit: 21 m tall
-  office_notepads: 0.35,
-  classic_laptop: 0.7,
-  portable_searchlight: 2.6, // a hand lamp, scaled up to a site floodlight
-};
+export type { PropId };
 
 /** Light, weather and how well bots perceive in it. */
 export interface EnvSpec {
@@ -216,8 +195,10 @@ export class LevelBuilder {
   readonly doors = new Map<string, Door>();
   readonly waters: Water[] = [];
   private batches = new Map<THREE.Material, THREE.BufferGeometry[]>();
+  /** Boxes that cast no shadow (trim, signs, the skyline): merged separately. */
+  private unshadowed = new Map<THREE.Material, THREE.BufferGeometry[]>();
   private mats = new Map<string, THREE.Material>();
-  private protos = new Map<PropId, { meshes: { mesh: THREE.Mesh; local: THREE.Matrix4 }[]; box: THREE.Box3 }>();
+  private boxes = new Map<PropId, THREE.Box3>();
   /** Placed props, drawn as one instanced mesh per prop part. */
   private placed = new Map<PropId, THREE.Matrix4[]>();
   /** Free-form static geometry (pipes, cables, frames), merged per material like the boxes. */
@@ -228,50 +209,24 @@ export class LevelBuilder {
 
   private constructor(private q: QualityPreset) {}
 
-  static async create(q: QualityPreset, textures: TexName[], props: PropId[] = []): Promise<LevelBuilder> {
+  static async create(q: QualityPreset, textures: TexName[]): Promise<LevelBuilder> {
     const b = new LevelBuilder(q);
     const sets = await Promise.all(textures.map((t) => loadPbr(TEX[t], q.textureRes, q.anisotropy)));
     textures.forEach((t, i) => {
       // Painted and rusted steel, not bare metal: full metalness goes black wherever the sky is dark
       const m = pbrMaterial(sets[i], { metalness: METALS.has(t) ? 0.45 : 0 });
+      if (METALS.has(t)) m.userData.metal = true;
       b.mats.set(t, m);
       b.owned.push(m);
     });
-    const ids = [...new Set<PropId>([...props, ...DRESS_PROPS])];
-    const gltfs = await Promise.all(ids.map((id) => loadModel(id)));
-    ids.forEach((id, i) => {
-      const root = gltfs[i].scene;
-      root.updateMatrixWorld(true);
-      const meshes: { mesh: THREE.Mesh; local: THREE.Matrix4 }[] = [];
-      root.traverse((c) => {
-        const m = c as THREE.Mesh;
-        if (!m.isMesh) return;
-        // Instanced copies are static: drop morph targets (and skinning) the prop was exported with
-        if (Object.keys(m.geometry.morphAttributes).length || m.geometry.attributes.skinIndex) {
-          if (!m.geometry.userData.staticCopy) {
-            const g = m.geometry.clone();
-            g.morphAttributes = {};
-            g.deleteAttribute('skinIndex');
-            g.deleteAttribute('skinWeight');
-            m.geometry.userData.staticCopy = g;
-          }
-          const flat = new THREE.Mesh(m.geometry.userData.staticCopy as THREE.BufferGeometry, m.material);
-          meshes.push({ mesh: flat, local: m.matrixWorld.clone() });
-          return;
-        }
-        meshes.push({ mesh: m, local: m.matrixWorld.clone() });
-      });
-      // Stand every model on its base, whatever its origin, at its corrected scale
-      const k = PROP_SCALE[id] ?? 1;
-      const box = new THREE.Box3().setFromObject(root);
-      const fix = new THREE.Matrix4().makeScale(k, k, k).multiply(new THREE.Matrix4().makeTranslation(0, -box.min.y, 0));
-      for (const m of meshes) m.local.premultiply(fix);
-      box.translate(new THREE.Vector3(0, -box.min.y, 0));
-      box.min.multiplyScalar(k);
-      box.max.multiplyScalar(k);
-      b.protos.set(id, { meshes, box });
-    });
     return b;
+  }
+
+  /** A prop's box standing at the origin (models are loaded only when the map is finished). */
+  private protoBox(id: PropId): THREE.Box3 {
+    let box = this.boxes.get(id);
+    if (!box) this.boxes.set(id, (box = propBaseBox(id)));
+    return box;
   }
 
   /** A textured material loaded for this map. */
@@ -287,6 +242,7 @@ export class LevelBuilder {
     let m = this.mats.get(key);
     if (!m) {
       const c = (this.mat(name) as THREE.MeshStandardMaterial).clone();
+      c.userData = { ...c.userData };
       c.color.set(color);
       if (roughness !== undefined) c.roughness = roughness;
       m = c;
@@ -302,10 +258,22 @@ export class LevelBuilder {
     let m = this.mats.get(key);
     if (!m) {
       m = new THREE.MeshStandardMaterial({ color, roughness, metalness });
+      if (metalness >= 0.3) m.userData.metal = true;
       this.mats.set(key, m);
       this.owned.push(m);
     }
     return m;
+  }
+
+  /** Hand a material made elsewhere (the dresser's decals and signs) to the map, to be freed with it. */
+  own<M extends THREE.Material>(m: M): M {
+    this.owned.push(m);
+    return m;
+  }
+
+  /** Door and window frames. */
+  frameMat(): THREE.Material {
+    return this.flat(0x3a3d40, 0.55, 0.35);
   }
 
   /** Unlit glowing surface (lamps, screens, status lights). Values above 1 bloom. */
@@ -328,13 +296,14 @@ export class LevelBuilder {
   // Solids
 
   /** Axis-aligned box from corner to corner. */
-  box(min: V3, max: V3, mat: THREE.Material, opts: { collide?: boolean; tile?: number } = {}): THREE.Box3 {
+  box(min: V3, max: V3, mat: THREE.Material, opts: { collide?: boolean; tile?: number; shadow?: boolean } = {}): THREE.Box3 {
     const w = max[0] - min[0], h = max[1] - min[1], d = max[2] - min[2];
     if (w <= 0 || h <= 0 || d <= 0) throw new Error(`empty box ${min} ${max}`);
     const g = worldBox(w, h, d, opts.tile ?? 3);
     g.translate(min[0] + w / 2, min[1] + h / 2, min[2] + d / 2);
-    let list = this.batches.get(mat);
-    if (!list) this.batches.set(mat, (list = []));
+    const batches = opts.shadow === false ? this.unshadowed : this.batches;
+    let list = batches.get(mat);
+    if (!list) batches.set(mat, (list = []));
     list.push(g);
     const b = new THREE.Box3(new THREE.Vector3(...min), new THREE.Vector3(...max));
     if (opts.collide !== false) this.colliders.push(b);
@@ -370,7 +339,7 @@ export class LevelBuilder {
    * gaps given in world coordinates along the wall.
    */
   wall(x0: number, z0: number, x1: number, z1: number, y0: number, y1: number, mat: THREE.Material,
-    opts: { t?: number; gaps?: Gap[] } = {}): void {
+    opts: { t?: number; gaps?: Gap[]; frames?: boolean } = {}): void {
     const t = (opts.t ?? 0.3) / 2;
     const alongX = Math.abs(z1 - z0) < 1e-6;
     if (!alongX && Math.abs(x1 - x0) > 1e-6) throw new Error('walls must be axis-aligned');
@@ -382,10 +351,25 @@ export class LevelBuilder {
       else this.box([x0 - t, lo, from], [x0 + t, hi, to], mat);
     };
     let at = a;
+    const trim = (u0: number, u1: number, lo: number, hi: number): void => {
+      if (u1 - u0 < 0.01 || hi - lo < 0.01) return;
+      const d = t + 0.035;
+      if (alongX) this.box([u0, lo, z0 - d], [u1, hi, z0 + d], this.frameMat(), { collide: false, shadow: false });
+      else this.box([x0 - d, lo, u0], [x0 + d, hi, u1], this.frameMat(), { collide: false, shadow: false });
+    };
     for (const [from, to, sill = 0, top = 2.5] of [...(opts.gaps ?? [])].sort((p, q) => p[0] - q[0])) {
       piece(at, from, y0, y1);
       if (sill > 0) piece(from, to, y0, y0 + sill);
       piece(from, to, Math.min(y1, y0 + top), y1);
+      // A frame round the opening, on both faces of the wall (visual only, outside the gap)
+      const head = Math.min(y1, y0 + top);
+      if (opts.frames !== false && head < y1 - 0.05 && to - from < 6) {
+        const yb = y0 + sill;
+        trim(from - 0.09, from, yb, head + 0.09);
+        trim(to, to + 0.09, yb, head + 0.09);
+        trim(from - 0.09, to + 0.09, head, head + 0.09);
+        if (sill > 0) trim(from - 0.12, to + 0.12, yb - 0.07, yb);
+      }
       at = to;
     }
     piece(at, b, y0, y1);
@@ -425,21 +409,71 @@ export class LevelBuilder {
     return n * D;
   }
 
-  /** Waist-high barrier along an edge: stops a fall and gives low cover. */
-  rail(x0: number, z0: number, x1: number, z1: number, y: number, mat: THREE.Material, h = 1.05): void {
+  /**
+   * Waist-high barrier along an edge: stops a fall. Metal ones are drawn as open railings (posts,
+   * a top and a middle rail, a toe board) over the same solid box; others are a low wall.
+   */
+  rail(x0: number, z0: number, x1: number, z1: number, y: number, mat: THREE.Material, h = 1.05, opts: { open?: boolean } = {}): void {
     const alongX = Math.abs(z1 - z0) < 1e-6;
     const a = alongX ? Math.min(x0, x1) : Math.min(z0, z1);
     const b = alongX ? Math.max(x0, x1) : Math.max(z0, z1);
     if (b - a < 0.05) return;
-    if (alongX) this.box([a, y, z0 - 0.05], [b, y + h, z0 + 0.05], mat);
-    else this.box([x0 - 0.05, y, a], [x0 + 0.05, y + h, b], mat);
+    const open = opts.open ?? !!mat.userData.metal;
+    const lo: V3 = alongX ? [a, y, z0 - 0.05] : [x0 - 0.05, y, a];
+    const hi: V3 = alongX ? [b, y + h, z0 + 0.05] : [x0 + 0.05, y + h, b];
+    if (!open) {
+      this.box(lo, hi, mat);
+      return;
+    }
+    // The collider: the same box as a solid rail, never drawn
+    this.colliders.push(new THREE.Box3(new THREE.Vector3(...lo), new THREE.Vector3(...hi)));
+    const seg = (u0: number, u1: number, y0: number, y1: number, half: number): void => {
+      if (alongX) this.box([u0, y0, z0 - half], [u1, y1, z0 + half], mat, { collide: false });
+      else this.box([x0 - half, y0, u0], [x0 + half, y1, u1], mat, { collide: false });
+    };
+    seg(a, b, y + h - 0.05, y + h, 0.03); // top rail
+    seg(a, b, y + h * 0.5 - 0.02, y + h * 0.5 + 0.02, 0.02); // middle rail
+    seg(a, b, y, y + 0.1, 0.008); // toe board
+    const n = Math.max(1, Math.round((b - a) / 1.3));
+    for (let i = 0; i <= n; i++) {
+      const u = Math.min(b - 0.025, Math.max(a + 0.025, a + ((b - a) * i) / n));
+      seg(u - 0.025, u + 0.025, y, y + h - 0.05, 0.025);
+    }
   }
 
   /** 20 ft shipping container standing on `y`. */
   container(x: number, z: number, y: number, alongX: boolean, mat: THREE.Material): void {
-    const hl = 3.05, hw = 1.22;
-    if (alongX) this.box([x - hl, y, z - hw], [x + hl, y + 2.6, z + hw], mat, { tile: 2 });
-    else this.box([x - hw, y, z - hl], [x + hw, y + 2.6, z + hl], mat, { tile: 2 });
+    const hl = 3.05, hw = 1.22, H = 2.6;
+    // Local (u along the length, v across) to world
+    const put = (u0: number, u1: number, v0: number, v1: number, y0: number, y1: number, m: THREE.Material, big = false): void => {
+      if (alongX) this.box([x + u0, y + y0, z + v0], [x + u1, y + y1, z + v1], m, { tile: 2, collide: false, shadow: big });
+      else this.box([x + v0, y + y0, z + u0], [x + v1, y + y1, z + u1], m, { tile: 2, collide: false, shadow: big });
+    };
+    // Body, a little inside the frame, then the frame: corner posts, top and bottom rails
+    put(-hl + 0.04, hl - 0.04, -hw + 0.03, hw - 0.03, 0.12, H - 0.08, mat, true);
+    // The collider is the whole box, as before, so stacks and anything standing on top still work
+    this.colliders.push(alongX
+      ? new THREE.Box3(new THREE.Vector3(x - hl, y, z - hw), new THREE.Vector3(x + hl, y + H, z + hw))
+      : new THREE.Box3(new THREE.Vector3(x - hw, y, z - hl), new THREE.Vector3(x + hw, y + H, z + hl)));
+    const frame = mat;
+    for (const su of [-1, 1]) {
+      for (const sv of [-1, 1]) put(su > 0 ? hl - 0.16 : -hl, su > 0 ? hl : -hl + 0.16, sv > 0 ? hw - 0.16 : -hw, sv > 0 ? hw : -hw + 0.16, 0, H, frame, true);
+    }
+    for (const sv of [-1, 1]) {
+      put(-hl, hl, sv > 0 ? hw - 0.12 : -hw, sv > 0 ? hw : -hw + 0.12, 0, 0.16, frame);
+      put(-hl, hl, sv > 0 ? hw - 0.1 : -hw, sv > 0 ? hw : -hw + 0.1, H - 0.1, H, frame);
+    }
+    // Corrugation on the long sides and the roof
+    for (let u = -hl + 0.35; u < hl - 0.3; u += 0.28) {
+      for (const sv of [-1, 1]) put(u - 0.07, u + 0.07, sv > 0 ? hw - 0.03 : -hw, sv > 0 ? hw : -hw + 0.03, 0.16, H - 0.1, mat);
+    }
+    // Doors on the +u end: the seam, four locking bars with their handles
+    const dark = this.flat(0x2a2c2e, 0.5, 0.5);
+    put(hl - 0.04, hl - 0.005, -0.012, 0.012, 0.16, H - 0.1, dark);
+    for (const v of [-0.85, -0.3, 0.3, 0.85]) {
+      put(hl - 0.005, hl + 0.03, v - 0.025, v + 0.025, 0.14, H - 0.08, dark);
+      put(hl - 0.005, hl + 0.05, v - 0.02, v + 0.09, 1.05, 1.12, dark);
+    }
   }
 
   /** Round-ish column. */
@@ -467,29 +501,26 @@ export class LevelBuilder {
    */
   prop(id: PropId, x: number, y: number, z: number, rotY = 0,
     opts: { scale?: number; collide?: boolean; tilt?: [number, number] } = {}): THREE.Box3 {
-    const m = this.propMatrix(id, x, y, z, rotY, opts.scale ?? 1, opts.tilt);
+    const m = this.propMatrix(x, y, z, rotY, opts.scale ?? 1, opts.tilt);
     let list = this.placed.get(id);
     if (!list) this.placed.set(id, (list = []));
     list.push(m);
-    const box = this.protos.get(id)!.box.clone().applyMatrix4(m);
+    const box = this.protoBox(id).clone().applyMatrix4(m);
     if (opts.collide !== false) this.colliders.push(box);
     return box;
   }
 
   /** Where a prop would be, without placing it. */
   propBox(id: PropId, x: number, y: number, z: number, rotY = 0, scale = 1): THREE.Box3 {
-    return this.protos.get(id)!.box.clone().applyMatrix4(this.propMatrix(id, x, y, z, rotY, scale));
+    return this.protoBox(id).clone().applyMatrix4(this.propMatrix(x, y, z, rotY, scale));
   }
 
   /** Size of a prop as modelled (metres). */
   propSize(id: PropId): THREE.Vector3 {
-    const p = this.protos.get(id);
-    if (!p) throw new Error(`prop ${id} was not loaded`);
-    return p.box.getSize(new THREE.Vector3());
+    return this.protoBox(id).getSize(new THREE.Vector3());
   }
 
-  private propMatrix(id: PropId, x: number, y: number, z: number, rotY: number, scale: number, tilt?: [number, number]): THREE.Matrix4 {
-    if (!this.protos.has(id)) throw new Error(`prop ${id} was not requested for this map`);
+  private propMatrix(x: number, y: number, z: number, rotY: number, scale: number, tilt?: [number, number]): THREE.Matrix4 {
     const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(tilt?.[0] ?? 0, rotY, tilt?.[1] ?? 0, 'YXZ'));
     return new THREE.Matrix4().compose(new THREE.Vector3(x, y, z), q, new THREE.Vector3(scale, scale, scale));
   }
@@ -587,21 +618,24 @@ export class LevelBuilder {
   // ---------------------------------------------------------------------------------------------
 
   /** Merge the boxes, set up sky, sun, fog, lamps and weather, and add everything to the scene. */
-  finish(scene: THREE.Scene, gl: THREE.WebGLRenderer, env: EnvSpec, bounds: THREE.Box3): BuiltLevel {
+  async finish(scene: THREE.Scene, gl: THREE.WebGLRenderer, env: EnvSpec, bounds: THREE.Box3): Promise<BuiltLevel> {
     const q = this.q;
     const root = this.root;
     root.name = 'map';
-    for (const [mat, geos] of this.batches) {
-      const merged = mergeGeometries(geos, false);
-      for (const g of geos) g.dispose();
-      const mesh = new THREE.Mesh(merged, mat);
-      const lit = !(mat as THREE.MeshBasicMaterial).isMeshBasicMaterial;
-      mesh.castShadow = lit;
-      mesh.receiveShadow = lit;
-      if (!lit) mesh.userData.noAO = true;
-      root.add(mesh);
+    for (const [batches, shadow] of [[this.batches, true], [this.unshadowed, false]] as const) {
+      for (const [mat, geos] of batches) {
+        const merged = mergeGeometries(geos, false);
+        for (const g of geos) g.dispose();
+        const mesh = new THREE.Mesh(merged, mat);
+        const lit = !(mat as THREE.MeshBasicMaterial).isMeshBasicMaterial;
+        mesh.castShadow = lit && shadow;
+        mesh.receiveShadow = lit;
+        if (!lit) mesh.userData.noAO = true;
+        mesh.matrixAutoUpdate = false;
+        root.add(mesh);
+      }
+      batches.clear();
     }
-    this.batches.clear();
     for (const [mat, geos] of this.extra) {
       const merged = mergeGeometries(geos.map((g) => {
         const n = g.clone();
@@ -619,20 +653,9 @@ export class LevelBuilder {
       root.add(mesh);
     }
     this.extra.clear();
-    // Props: one instanced mesh per part of each prop. The geometry belongs to the model cache.
-    for (const [id, mats] of this.placed) {
-      for (const { mesh, local } of this.protos.get(id)!.meshes) {
-        const inst = new THREE.InstancedMesh(mesh.geometry, mesh.material, mats.length);
-        const m = new THREE.Matrix4();
-        mats.forEach((w, i) => inst.setMatrixAt(i, m.multiplyMatrices(w, local)));
-        inst.instanceMatrix.needsUpdate = true;
-        inst.computeBoundingSphere();
-        inst.castShadow = inst.receiveShadow = true;
-        inst.geometry.userData.shared = true;
-        inst.userData.sharedMaterial = true;
-        root.add(inst);
-      }
-    }
+    // Props: loaded now, only the ones this map placed (see props.ts)
+    const props = await buildProps(this.placed, q.shadows && env.sunIntensity > 0);
+    root.add(props.root);
     this.placed.clear();
 
     const sunDir = new THREE.Vector3(...env.sunDir).normalize();
@@ -662,6 +685,7 @@ export class LevelBuilder {
     sun.target.position.copy(center);
     sun.castShadow = q.shadows && env.sunIntensity > 0;
     sun.shadow.mapSize.set(q.shadowMapSize, q.shadowMapSize);
+    sun.shadow.camera.layers.enable(SHADOW_LAYER); // the props' coarse shadow casters
     const view = new THREE.Matrix4().lookAt(sun.position, center, UP).invert();
     const lo = new THREE.Vector3(Infinity, Infinity, Infinity), hi = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
     const c = new THREE.Vector3();
@@ -775,6 +799,7 @@ export class LevelBuilder {
         time += dt;
         sky.material.uniforms.uTime.value += dt;
         sky.position.copy(viewer);
+        props.update(viewer);
         for (const l of lights) {
           const f = l.flicker > 0 && Math.sin(time * 31 + l.light.position.x) * Math.sin(time * 7.3 + l.light.position.z) > 1 - l.flicker ? 0.25 : 1;
           l.light.intensity = power ? l.base * f : 0;
@@ -819,7 +844,11 @@ export class LevelBuilder {
           const m = o as THREE.Mesh;
           if (m.isMesh && m.geometry && !(m.geometry as THREE.BufferGeometry).userData.shared) m.geometry.dispose();
         });
-        for (const m of owned) m.dispose();
+        for (const m of owned) {
+          releaseTextures(m);
+          m.dispose();
+        }
+        props.dispose();
         sky.material.dispose();
         rain?.material.dispose();
         envTarget.dispose();

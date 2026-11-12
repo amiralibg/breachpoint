@@ -80,6 +80,45 @@ export function installDevTools(game: Game): void {
     }
     return n;
   };
+  /**
+   * Frame cost where the player stands, looking four ways: ms per whole frame (sim + render,
+   * waited on the GPU), draw calls and triangles. Optionally starts a mission first.
+   */
+  w.__perf = async (id?: string, frames = 20): Promise<unknown> => {
+    if (id) await (w.__start as (m: string) => Promise<string>)(id);
+    const gl = game.renderer.gl;
+    gl.setAnimationLoop(null);
+    const ctx = gl.getContext();
+    const px = new Uint8Array(4);
+    const sync = (): void => ctx.readPixels(0, 0, 1, 1, ctx.RGBA, ctx.UNSIGNED_BYTE, px);
+    let meshes = 0, tris = 0, lights = 0;
+    game.scene.traverse((o) => {
+      if ((o as THREE.PointLight).isPointLight) lights++;
+      const m = o as THREE.Mesh;
+      if (!m.isMesh || !m.visible) return;
+      meshes++;
+      const n = (m.geometry.index ? m.geometry.index.count : m.geometry.attributes.position.count) / 3;
+      tris += n * ((m as THREE.InstancedMesh).isInstancedMesh ? (m as THREE.InstancedMesh).count : 1);
+    });
+    const views: unknown[] = [];
+    let total = 0;
+    for (const yaw of [0, Math.PI / 2, Math.PI, -Math.PI / 2]) {
+      game.player.yaw = yaw;
+      for (let i = 0; i < 3; i++) g.frame();
+      sync();
+      gl.info.autoReset = false;
+      gl.info.reset();
+      const t0 = performance.now();
+      for (let i = 0; i < frames; i++) g.frame();
+      sync();
+      const ms = (performance.now() - t0) / frames;
+      total += ms;
+      views.push({ yaw: +yaw.toFixed(2), ms: +ms.toFixed(2), calls: Math.round(gl.info.render.calls / frames), tris: Math.round(gl.info.render.triangles / frames) });
+      gl.info.autoReset = true;
+    }
+    gl.setAnimationLoop(() => g.frame());
+    return { map: game.map.id, avgMs: +(total / 4).toFixed(2), meshes, sceneTris: Math.round(tris), lights, views };
+  };
   w.__st = (): unknown => ({
     stage: g.mode?.stage?.id, state: game.state,
     pos: game.player.position.toArray().map((v) => +v.toFixed(2)), hp: Math.round(game.player.health),

@@ -95,6 +95,60 @@ function chainTexture(): THREE.CanvasTexture {
   return t;
 }
 
+/** Vertical grime: dark at the top, running down in uneven drips (alpha). */
+function streakTexture(): THREE.CanvasTexture {
+  let t = canvasCache.get('streak');
+  if (t) return t;
+  const c = document.createElement('canvas');
+  c.width = 128;
+  c.height = 256;
+  const g = c.getContext('2d')!;
+  const r = rng(31);
+  for (let i = 0; i < 26; i++) {
+    const x = 10 + r() * 108, w = 2 + r() * 10, len = 60 + r() * 196;
+    const grd = g.createLinearGradient(0, 0, 0, len);
+    grd.addColorStop(0, `rgba(255,255,255,${0.25 + r() * 0.35})`);
+    grd.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grd;
+    g.fillRect(x, 0, w, len);
+  }
+  // Fade the sides
+  const side = g.createLinearGradient(0, 0, 128, 0);
+  side.addColorStop(0, 'rgba(0,0,0,1)');
+  side.addColorStop(0.2, 'rgba(0,0,0,0)');
+  side.addColorStop(0.8, 'rgba(0,0,0,0)');
+  side.addColorStop(1, 'rgba(0,0,0,1)');
+  g.globalCompositeOperation = 'destination-out';
+  g.fillStyle = side;
+  g.fillRect(0, 0, 128, 256);
+  t = new THREE.CanvasTexture(c);
+  canvasCache.set('streak', t);
+  return t;
+}
+
+/** Rising damp: strong at the bottom edge, ragged top (alpha, tiles along u). */
+function dampTexture(): THREE.CanvasTexture {
+  let t = canvasCache.get('damp');
+  if (t) return t;
+  const c = document.createElement('canvas');
+  c.width = 256;
+  c.height = 64;
+  const g = c.getContext('2d')!;
+  const r = rng(53);
+  for (let x = 0; x < 256; x += 4) {
+    const h = 20 + r() * 40;
+    const grd = g.createLinearGradient(0, 64, 0, 64 - h);
+    grd.addColorStop(0, 'rgba(255,255,255,0.8)');
+    grd.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grd;
+    g.fillRect(x, 64 - h, 5, h);
+  }
+  t = new THREE.CanvasTexture(c);
+  t.wrapS = THREE.RepeatWrapping;
+  canvasCache.set('damp', t);
+  return t;
+}
+
 type Weighted = [PropId, number, { scale?: number; collide?: boolean }?];
 
 export class Dresser {
@@ -116,7 +170,7 @@ export class Dresser {
 
   private material(key: string, make: () => THREE.Material): THREE.Material {
     let m = this.mats.get(key);
-    if (!m) this.mats.set(key, (m = make()));
+    if (!m) this.mats.set(key, (m = this.b.own(make())));
     return m;
   }
 
@@ -149,8 +203,8 @@ export class Dresser {
     const box = (u0: number, u1: number, yy0: number, yy1: number, d0: number, d1: number, mat: THREE.Material): void => {
       const p0 = at + out * d0, p1 = at + out * d1;
       const lo = Math.min(p0, p1), hi = Math.max(p0, p1);
-      if (alongX) b.box([u0, yy0, lo], [u1, yy1, hi], mat, { collide: false });
-      else b.box([lo, yy0, u0], [hi, yy1, u1], mat, { collide: false });
+      if (alongX) b.box([u0, yy0, lo], [u1, yy1, hi], mat, { collide: false, shadow: false });
+      else b.box([lo, yy0, u0], [hi, yy1, u1], mat, { collide: false, shadow: false });
     };
     for (let y = y0 + (opts.skipGround ? floorH : 0); y + sill + h <= y1 - 0.2; y += floorH) {
       for (let i = 0; i < n; i++) {
@@ -220,8 +274,8 @@ export class Dresser {
     const box = (u0: number, u1: number, y0: number, y1: number, d0: number, d1: number, mat: THREE.Material): void => {
       const p0 = at + out * d0, p1 = at + out * d1;
       const lo = Math.min(p0, p1), hi = Math.max(p0, p1);
-      if (alongX) b.box([u0, y0, lo], [u1, y1, hi], mat, { collide: false });
-      else b.box([lo, y0, u0], [hi, y1, u1], mat, { collide: false });
+      if (alongX) b.box([u0, y0, lo], [u1, y1, hi], mat, { collide: false, shadow: false });
+      else b.box([lo, y0, u0], [hi, y1, u1], mat, { collide: false, shadow: false });
     };
     for (let i = 0; i < n; i++) {
       const u0 = a + pad + i * (w + pad), u1 = u0 + w;
@@ -470,8 +524,8 @@ export class Dresser {
     const dash = opts.dash ?? c - a, gap = opts.gap ?? 0;
     for (let u = a; u < c; u += dash + gap) {
       const e = Math.min(c, u + dash);
-      if (alongX) this.b.box([u, y, z0 - w], [e, y + 0.012, z0 + w], mat, { collide: false });
-      else this.b.box([x0 - w, y, u], [x0 + w, y + 0.012, e], mat, { collide: false });
+      if (alongX) this.b.box([u, y, z0 - w], [e, y + 0.012, z0 + w], mat, { collide: false, shadow: false });
+      else this.b.box([x0 - w, y, u], [x0 + w, y + 0.012, e], mat, { collide: false, shadow: false });
     }
   }
 
@@ -484,8 +538,8 @@ export class Dresser {
     for (let u = a; u < c; u += 0.4, k++) {
       const e = Math.min(c, u + 0.4);
       const m = k % 2 ? yel : blk;
-      if (alongX) this.b.box([u, y, z0 - w / 2], [e, y + 0.01, z0 + w / 2], m, { collide: false });
-      else this.b.box([x0 - w / 2, y, u], [x0 + w / 2, y + 0.01, e], m, { collide: false });
+      if (alongX) this.b.box([u, y, z0 - w / 2], [e, y + 0.01, z0 + w / 2], m, { collide: false, shadow: false });
+      else this.b.box([x0 - w / 2, y, u], [x0 + w / 2, y + 0.01, e], m, { collide: false, shadow: false });
     }
   }
 
@@ -529,6 +583,394 @@ export class Dresser {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // Signs and paint
+
+  private atlas: { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; x: number; y: number; row: number; tex: THREE.CanvasTexture } | null = null;
+
+  /** Room in the shared sign atlas for a w x h pixel label; returns its UV rectangle. */
+  private atlasSlot(w: number, h: number): { ctx: CanvasRenderingContext2D; px: number; py: number; uv: [number, number, number, number] } {
+    if (!this.atlas) {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 2048;
+      const ctx = canvas.getContext('2d')!;
+      ctx.clearRect(0, 0, 2048, 2048);
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.anisotropy = 4;
+      this.atlas = { canvas, ctx, x: 0, y: 0, row: 0, tex };
+    }
+    const A = this.atlas;
+    w = Math.min(2048, Math.ceil(w));
+    if (A.x + w > 2048) {
+      A.x = 0;
+      A.y += A.row + 2;
+      A.row = 0;
+    }
+    if (A.y + h > 2048) {
+      // Out of room: draw over a corner rather than fail the whole map
+      console.warn('sign atlas full');
+      return { ctx: A.ctx, px: 0, py: 0, uv: [0, 1 - h / 2048, w / 2048, 1] };
+    }
+    const px = A.x, py = A.y;
+    A.x += w + 2;
+    A.row = Math.max(A.row, h);
+    A.tex.needsUpdate = true;
+    return { ctx: A.ctx, px, py, uv: [px / 2048, 1 - (py + h) / 2048, (px + w) / 2048, 1 - py / 2048] };
+  }
+
+  private labels = new Map<string, [number, number, number, number]>();
+
+  /**
+   * A label in the atlas, drawn once per distinct key: the same sign text in the same style reuses
+   * its slot. `burn` is how many random numbers drawing it takes, so a reused label leaves the
+   * map's random stream (and everything placed after it) exactly as if it had been drawn again.
+   */
+  private label(key: string, w: number, h: number, burn: number, draw: (ctx: CanvasRenderingContext2D, px: number, py: number) => void): [number, number, number, number] {
+    const hit = this.labels.get(key);
+    if (hit) {
+      for (let i = 0; i < burn; i++) this.r();
+      return hit;
+    }
+    const { ctx, px, py, uv } = this.atlasSlot(w, h);
+    draw(ctx, px, py);
+    this.labels.set(key, uv);
+    return uv;
+  }
+
+  /** A flat quad on a wall facing `face`, centred at `along`, from y to y + h, UV-mapped to `uv`. */
+  private wallQuad(face: Face, at: number, along: number, y: number, w: number, h: number, off: number, uv: [number, number, number, number], mat: THREE.Material): void {
+    const g = new THREE.PlaneGeometry(w, h);
+    const a = g.attributes.uv as THREE.BufferAttribute;
+    for (let i = 0; i < a.count; i++) a.setXY(i, uv[0] + a.getX(i) * (uv[2] - uv[0]), uv[1] + a.getY(i) * (uv[3] - uv[1]));
+    const rot = face === '+z' ? 0 : face === '-z' ? Math.PI : face === '+x' ? Math.PI / 2 : -Math.PI / 2;
+    g.rotateY(rot);
+    const out = face[0] === '+' ? 1 : -1;
+    if (face[1] === 'z') g.translate(along, y + h / 2, at + out * off);
+    else g.translate(at + out * off, y + h / 2, along);
+    this.b.geo(g, mat);
+  }
+
+  /**
+   * A sign board on a wall: text on a painted plate (a shop name, "PUMP STATION 3", a warning).
+   * `glow` makes it a lit sign. Height `h` in metres; the width follows the text unless given.
+   */
+  sign(face: Face, at: number, along: number, y: number, text: string, opts: {
+    h?: number; w?: number; bg?: string; fg?: string; font?: string; glow?: number; border?: string; plate?: boolean; lines?: string[];
+  } = {}): void {
+    const h = opts.h ?? 0.5;
+    const lines = opts.lines ?? [text];
+    const PX = 96 * lines.length;
+    const font = opts.font ?? '700 64px "Arial Narrow", Arial, sans-serif';
+    const probe = this.textWidth(lines, font);
+    const aspect = opts.w ? opts.w / h : Math.max(1, (probe + 48) / PX);
+    const wpx = Math.round(PX * aspect);
+    const key = `sign|${lines.join('\n')}|${font}|${opts.bg}|${opts.fg}|${opts.border}|${wpx}`;
+    const uv = this.label(key, wpx, PX, 200, (ctx, px, py) => {
+      ctx.save();
+      ctx.fillStyle = opts.bg ?? '#d8d4c8';
+      ctx.fillRect(px, py, wpx, PX);
+      if (opts.border) {
+        ctx.strokeStyle = opts.border;
+        ctx.lineWidth = 8;
+        ctx.strokeRect(px + 8, py + 8, wpx - 16, PX - 16);
+      }
+      ctx.fillStyle = opts.fg ?? '#1c1c1c';
+      ctx.font = font;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      lines.forEach((l, i) => ctx.fillText(l, px + wpx / 2, py + 96 * i + 50, wpx - 24));
+      // A little weathering (5 random numbers per smudge: keep `burn` in step)
+      for (let i = 0; i < 40; i++) {
+        ctx.fillStyle = `rgba(40,30,20,${this.rand(0.02, 0.08)})`;
+        ctx.fillRect(px + this.r() * wpx, py + this.r() * PX, this.rand(4, 30), this.rand(2, 12));
+      }
+      ctx.restore();
+    });
+    const w = h * aspect;
+    const mat = opts.glow
+      ? this.material(`signGlow:${opts.glow}`, () => new THREE.MeshBasicMaterial({ map: this.atlas!.tex, color: new THREE.Color(1, 1, 1).multiplyScalar(opts.glow!) }))
+      : this.material('sign', () => new THREE.MeshStandardMaterial({ map: this.atlas!.tex, roughness: 0.7, metalness: 0.1 }));
+    if (opts.plate !== false) {
+      const out = face[0] === '+' ? 1 : -1;
+      const p0 = at, p1 = at + out * 0.03;
+      const lo = Math.min(p0, p1), hi = Math.max(p0, p1);
+      const pm = this.b.flat(0x3a3d40, 0.6, 0.4);
+      if (face[1] === 'z') this.b.box([along - w / 2 - 0.02, y - 0.02, lo], [along + w / 2 + 0.02, y + h + 0.02, hi], pm, { collide: false, shadow: false });
+      else this.b.box([lo, y - 0.02, along - w / 2 - 0.02], [hi, y + h + 0.02, along + w / 2 + 0.02], pm, { collide: false, shadow: false });
+    }
+    this.wallQuad(face, at, along, y, w, h, opts.plate !== false ? 0.033 : 0.006, uv, mat);
+  }
+
+  private measureCtx: CanvasRenderingContext2D | null = null;
+  private textWidth(lines: string[], font: string): number {
+    if (!this.measureCtx) this.measureCtx = document.createElement('canvas').getContext('2d')!;
+    this.measureCtx.font = font;
+    return Math.max(...lines.map((l) => this.measureCtx!.measureText(l).width));
+  }
+
+  /** Stencilled paint straight on a surface (bay numbers, "NO ENTRY", arrows): transparent background. */
+  stencil(face: Face, at: number, along: number, y: number, text: string, opts: { h?: number; color?: string; font?: string; opacity?: number } = {}): void {
+    const h = opts.h ?? 0.6;
+    const font = opts.font ?? '900 80px Impact, "Arial Black", sans-serif';
+    const PX = 96;
+    const wpx = Math.round(this.textWidth([text], font) + 24);
+    const uv = this.label(`stencil|${text}|${font}|${opts.color}`, wpx, PX, 240, (ctx, px, py) => {
+      ctx.save();
+      ctx.clearRect(px, py, wpx, PX);
+      ctx.fillStyle = opts.color ?? '#e8e2d0';
+      ctx.font = font;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, px + wpx / 2, py + PX / 2 + 4);
+      // Worn paint: knock holes in it (4 random numbers per hole: keep `burn` in step)
+      ctx.globalCompositeOperation = 'destination-out';
+      for (let i = 0; i < 60; i++) {
+        ctx.fillStyle = `rgba(0,0,0,${this.rand(0.2, 0.7)})`;
+        ctx.beginPath();
+        ctx.arc(px + this.r() * wpx, py + this.r() * PX, this.rand(1, 6), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    });
+    const mat = this.material(`stencil:${opts.opacity ?? 0.85}`, () => new THREE.MeshStandardMaterial({
+      map: this.atlas!.tex, transparent: true, opacity: opts.opacity ?? 0.85, roughness: 0.8, depthWrite: false,
+      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+    }));
+    this.wallQuad(face, at, along, y, (h * wpx) / PX, h, 0.004, uv, mat);
+  }
+
+  /** Painted text flat on a floor or road (bay numbers, "SLOW"), reading toward `face`. */
+  floorText(x: number, y: number, z: number, text: string, face: Face, opts: { h?: number; color?: string } = {}): void {
+    const h = opts.h ?? 1;
+    const font = '900 80px Impact, "Arial Black", sans-serif';
+    const PX = 96;
+    const wpx = Math.round(this.textWidth([text], font) + 24);
+    const uv = this.label(`floor|${text}|${opts.color}`, wpx, PX, 0, (ctx, px, py) => {
+      ctx.save();
+      ctx.clearRect(px, py, wpx, PX);
+      ctx.fillStyle = opts.color ?? '#d8d2bf';
+      ctx.font = font;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, px + wpx / 2, py + PX / 2 + 4);
+      ctx.restore();
+    });
+    const g = new THREE.PlaneGeometry((h * wpx) / PX, h);
+    const a = g.attributes.uv as THREE.BufferAttribute;
+    for (let i = 0; i < a.count; i++) a.setXY(i, uv[0] + a.getX(i) * (uv[2] - uv[0]), uv[1] + a.getY(i) * (uv[3] - uv[1]));
+    g.rotateX(-Math.PI / 2);
+    g.rotateY(face === '+z' ? Math.PI : face === '-z' ? 0 : face === '+x' ? -Math.PI / 2 : Math.PI / 2);
+    g.translate(x, y + 0.014, z);
+    this.b.geo(g, this.material('floorText', () => new THREE.MeshStandardMaterial({
+      map: this.atlas!.tex, transparent: true, opacity: 0.8, roughness: 0.85, depthWrite: false,
+      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+    })));
+  }
+
+  /**
+   * Grime running down a wall: dark streaks under window sills and roof edges, damp at the base.
+   * The wall line is at `at` facing `face`, from `a` to `c`, between y0 and y1.
+   */
+  streaks(face: Face, at: number, a: number, c: number, y0: number, y1: number, n: number, opts: { color?: number; opacity?: number; base?: boolean } = {}): void {
+    const mat = this.material(`streak:${opts.color ?? 0x14110d}:${opts.opacity ?? 0.5}`, () => new THREE.MeshBasicMaterial({
+      color: opts.color ?? 0x14110d, alphaMap: streakTexture(), transparent: true, opacity: opts.opacity ?? 0.5, depthWrite: false,
+      polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+    }));
+    const full: [number, number, number, number] = [0, 0, 1, 1];
+    for (let i = 0; i < n; i++) {
+      const w = this.rand(0.4, 1.6);
+      const along = this.rand(a + w / 2, c - w / 2);
+      const top = this.rand(y0 + (y1 - y0) * 0.3, y1);
+      const h = Math.min(top - y0, this.rand(1, 4));
+      if (h < 0.3) continue;
+      this.wallQuad(face, at, along, top - h, w, h, 0.008 + this.r() * 0.004, full, mat);
+    }
+    if (opts.base !== false) {
+      // Rising damp along the bottom
+      const m2 = this.material('damp', () => new THREE.MeshBasicMaterial({
+        color: 0x16140f, alphaMap: dampTexture(), transparent: true, opacity: 0.55, depthWrite: false,
+        polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+      }));
+      this.wallQuad(face, at, (a + c) / 2, y0, c - a, this.rand(0.5, 1.1), 0.007, [0, 0, (c - a) / 3, 1], m2);
+    }
+  }
+
+  /** Rain puddles: mirror-smooth dark water in the low spots of a floor. Visual only. */
+  puddles(rect: Rect, y: number, n: number, size: [number, number] = [0.8, 3]): void {
+    const mat = this.material('puddle', () => new THREE.MeshStandardMaterial({
+      color: 0x1a2026, roughness: 0.02, metalness: 0.3, alphaMap: blotTexture(), transparent: true, opacity: 0.6,
+      depthWrite: false, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3, envMapIntensity: 1.6,
+    }));
+    for (let i = 0; i < n; i++) {
+      const x = this.rand(rect[0], rect[2]), z = this.rand(rect[1], rect[3]);
+      if (Math.abs(this.b.floorAt(x, z, y) - y) > 0.06 || this.inside(x, y, z)) continue;
+      const s = this.rand(size[0], size[1]);
+      const g = new THREE.PlaneGeometry(s, s * this.rand(0.5, 0.9));
+      g.rotateX(-Math.PI / 2);
+      g.rotateY(this.r() * Math.PI);
+      g.translate(x, y + 0.01, z);
+      this.b.geo(g, mat);
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Small kit pieces, built from boxes (cheap: they merge with the map)
+
+  /** Wooden pallet on `y`, optionally loaded with sacks or boxes. Solid only if loaded. */
+  pallet(x: number, y: number, z: number, rot = 0, load: 'none' | 'sacks' | 'boxes' | 'wrapped' = 'none'): void {
+    const b = this.b;
+    const wood = b.flat(this.pick([0x8a6a45, 0x7a5c3a, 0x9a7a50]), 0.9);
+    const c = Math.cos(rot), s = Math.sin(rot);
+    const at = (u: number, v: number): [number, number] => [x + u * c + v * s, z - u * s + v * c];
+    const piece = (u: number, v: number, w: number, d: number, y0: number, y1: number, m: THREE.Material): void => {
+      // Rotated boxes are drawn as rotated geometry (no collider)
+      const g = new THREE.BoxGeometry(w, y1 - y0, d);
+      g.rotateY(rot);
+      const [px, pz] = at(u, v);
+      g.translate(px, y + (y0 + y1) / 2, pz);
+      b.geo(g, m);
+    };
+    for (const v of [-0.5, 0, 0.5]) piece(0, v, 1.2, 0.1, 0, 0.1, wood);
+    for (let u = -0.55; u <= 0.56; u += 0.183) piece(u, 0, 0.1, 1.0, 0.1, 0.14, wood);
+    let top = 0.14;
+    if (load === 'sacks') {
+      const sack = b.flat(this.pick([0xc8bc9c, 0xb8ae92, 0x9c9a88]), 0.95);
+      for (let k = 0; k < 3; k++) for (const u of [-0.3, 0.3]) for (const v of [-0.25, 0.25]) piece(u + this.rand(-0.03, 0.03), v, 0.55, 0.45, top + k * 0.16, top + k * 0.16 + 0.15, sack);
+      top += 0.48;
+    } else if (load === 'boxes') {
+      const card = b.flat(this.pick([0xa88a62, 0x9a7c56]), 0.9);
+      const layers = 2 + Math.floor(this.r() * 3);
+      for (let k = 0; k < layers; k++) for (const u of [-0.3, 0.3]) for (const v of [-0.25, 0.25]) piece(u, v, 0.56, 0.48, top + k * 0.4, top + k * 0.4 + 0.39, card);
+      top += layers * 0.4;
+    } else if (load === 'wrapped') {
+      const h = this.rand(0.8, 1.4);
+      piece(0, 0, 1.18, 0.98, top, top + h, b.flat(this.pick([0x8f969c, 0x6d7a84, 0x3f5a6a]), 0.25, 0.1));
+      top += h;
+    }
+    if (load !== 'none') {
+      const r = Math.abs(c) * 0.6 + Math.abs(s) * 0.5, q = Math.abs(s) * 0.6 + Math.abs(c) * 0.5;
+      b.colliders.push(new THREE.Box3(new THREE.Vector3(x - r, y, z - q), new THREE.Vector3(x + r, y + top, z + q)));
+    }
+  }
+
+  /** Traffic cone. */
+  cone(x: number, y: number, z: number): void {
+    const or = this.b.flat(0xd5541c, 0.6);
+    const g = new THREE.CylinderGeometry(0.03, 0.15, 0.62, 12);
+    g.translate(x, y + 0.34, z);
+    this.b.geo(g, or);
+    const band = new THREE.CylinderGeometry(0.075, 0.1, 0.1, 12, 1, true);
+    band.translate(x, y + 0.36, z);
+    this.b.geo(band, this.b.flat(0xe8e8e0, 0.4));
+    this.b.box([x - 0.19, y, z - 0.19], [x + 0.19, y + 0.03, z + 0.19], this.b.flat(0x1c1c1c, 0.8), { collide: false });
+  }
+
+  /** Steel bollard (solid). `kind` mooring = squat quay bollard. */
+  bollard(x: number, y: number, z: number, kind: 'post' | 'mooring' = 'post', color = 0x2b2e31): void {
+    const m = this.b.flat(color, 0.55, 0.5);
+    if (kind === 'mooring') {
+      this.cyl([x, y, z], 0.24, 0.6, m, 12);
+      this.cyl([x, y + 0.6, z], 0.32, 0.1, m, 12);
+      this.b.box([x - 0.22, y, z - 0.22], [x + 0.22, y + 0.7, z + 0.22], m, { collide: true, shadow: false, tile: 1 });
+      return;
+    }
+    this.cyl([x, y, z], 0.09, 0.95, m, 10);
+    this.cyl([x, y + 0.75, z], 0.095, 0.08, this.b.flat(0xc79a2a, 0.6), 10);
+    this.b.colliders.push(new THREE.Box3(new THREE.Vector3(x - 0.09, y, z - 0.09), new THREE.Vector3(x + 0.09, y + 0.95, z + 0.09)));
+  }
+
+  /** A row of sandbags from (x0, z0) to (x1, z1), `rows` high (about 0.14 m each). Solid: it is cover. */
+  sandbags(x0: number, z0: number, x1: number, z1: number, y: number, rows = 4): void {
+    const len = Math.hypot(x1 - x0, z1 - z0);
+    const ang = Math.atan2(z1 - z0, x1 - x0);
+    const mats = [this.b.flat(0x8c8068, 0.95), this.b.flat(0x7d725c, 0.95), this.b.flat(0x9a8e74, 0.95)];
+    const per = Math.max(1, Math.round(len / 0.55));
+    for (let r = 0; r < rows; r++) {
+      for (let i = 0; i < per; i++) {
+        const t = (i + 0.5 + (r % 2) * 0.5) / per;
+        if (t > 1) continue;
+        const g = new THREE.CapsuleGeometry(0.075, 0.38, 3, 8);
+        g.rotateZ(Math.PI / 2);
+        g.scale(1, 0.9, 1.9);
+        g.rotateY(-ang + this.rand(-0.08, 0.08));
+        g.translate(x0 + (x1 - x0) * t, y + 0.07 + r * 0.135, z0 + (z1 - z0) * t);
+        this.b.geo(g, this.pick(mats));
+      }
+    }
+    const h = rows * 0.135 + 0.02;
+    const pad = 0.16;
+    this.b.colliders.push(new THREE.Box3(
+      new THREE.Vector3(Math.min(x0, x1) - pad, y, Math.min(z0, z1) - pad), new THREE.Vector3(Math.max(x0, x1) + pad, y + h, Math.max(z0, z1) + pad)));
+  }
+
+  /** Rectangular duct (air handling) from a to c along one axis, w x h section, with flanges. Visual only. */
+  duct(a: V3, c: V3, w = 0.6, h = 0.4, color = 0x8f969b): void {
+    const m = this.b.flat(color, 0.4, 0.6);
+    const fl = this.b.flat(color - 0x101010, 0.45, 0.6);
+    const ax = Math.abs(c[0] - a[0]) > 1e-3 ? 0 : Math.abs(c[2] - a[2]) > 1e-3 ? 2 : 1;
+    const lo: V3 = [Math.min(a[0], c[0]), Math.min(a[1], c[1]), Math.min(a[2], c[2])];
+    const hi: V3 = [Math.max(a[0], c[0]), Math.max(a[1], c[1]), Math.max(a[2], c[2])];
+    const half: V3 = ax === 0 ? [0, h / 2, w / 2] : ax === 2 ? [w / 2, h / 2, 0] : [w / 2, 0, h / 2];
+    this.b.box([lo[0] - half[0], lo[1] - half[1], lo[2] - half[2]], [hi[0] + half[0], hi[1] + half[1], hi[2] + half[2]], m, { collide: false, tile: 1.2 });
+    for (let u = lo[ax] + 1.2; u < hi[ax] - 0.1; u += 1.2) {
+      const p0: V3 = [lo[0] - half[0] - 0.03, lo[1] - half[1] - 0.03, lo[2] - half[2] - 0.03];
+      const p1: V3 = [hi[0] + half[0] + 0.03, hi[1] + half[1] + 0.03, hi[2] + half[2] + 0.03];
+      p0[ax] = u - 0.025;
+      p1[ax] = u + 0.025;
+      this.b.box(p0, p1, fl, { collide: false, shadow: false });
+    }
+  }
+
+  /** Cable tray: a shallow open channel with cables in it, along an axis. Visual only. */
+  cableTray(a: V3, c: V3, w = 0.3): void {
+    const m = this.b.flat(0x9a9d9e, 0.5, 0.6);
+    const cab = this.b.flat(0x1a1b1c, 0.7);
+    const alongX = Math.abs(c[0] - a[0]) > Math.abs(c[2] - a[2]);
+    const [u0, u1] = alongX ? [Math.min(a[0], c[0]), Math.max(a[0], c[0])] : [Math.min(a[2], c[2]), Math.max(a[2], c[2])];
+    const v = alongX ? a[2] : a[0], y = a[1];
+    const put = (p0: number, p1: number, q0: number, q1: number, y0: number, y1: number, mm: THREE.Material): void => {
+      if (alongX) this.b.box([p0, y0, q0], [p1, y1, q1], mm, { collide: false, shadow: false });
+      else this.b.box([q0, y0, p0], [q1, y1, p1], mm, { collide: false, shadow: false });
+    };
+    put(u0, u1, v - w / 2, v + w / 2, y, y + 0.012, m);
+    put(u0, u1, v - w / 2, v - w / 2 + 0.012, y, y + 0.08, m);
+    put(u0, u1, v + w / 2 - 0.012, v + w / 2, y, y + 0.08, m);
+    put(u0, u1, v - w / 2 + 0.03, v + w / 2 - 0.03, y + 0.012, y + 0.05, cab);
+  }
+
+  /** A box mounted on a wall: junction boxes, breaker panels, signs' backs, vents. */
+  wallBox(face: Face, at: number, along: number, y: number, w: number, h: number, d: number, color = 0x7d8488, opts: { glow?: number; grille?: boolean } = {}): void {
+    const m = this.b.flat(color, 0.55, 0.4);
+    const out = face[0] === '+' ? 1 : -1;
+    const p0 = at, p1 = at + out * d;
+    const lo = Math.min(p0, p1), hi = Math.max(p0, p1);
+    if (face[1] === 'z') this.b.box([along - w / 2, y, lo], [along + w / 2, y + h, hi], m, { collide: false });
+    else this.b.box([lo, y, along - w / 2], [hi, y + h, along + w / 2], m, { collide: false });
+    if (opts.grille) {
+      const dark = this.b.flat(0x1e2022, 0.7);
+      for (let k = 1; k < 6; k++) {
+        const yy = y + (h * k) / 6;
+        const q0 = at + out * d, q1 = at + out * (d + 0.01);
+        const l2 = Math.min(q0, q1), h2 = Math.max(q0, q1);
+        if (face[1] === 'z') this.b.box([along - w / 2 + 0.04, yy - 0.015, l2], [along + w / 2 - 0.04, yy + 0.015, h2], dark, { collide: false, shadow: false });
+        else this.b.box([l2, yy - 0.015, along - w / 2 + 0.04], [h2, yy + 0.015, along + w / 2 - 0.04], dark, { collide: false, shadow: false });
+      }
+    }
+    if (opts.glow) {
+      const q0 = at + out * d, q1 = at + out * (d + 0.01);
+      const l2 = Math.min(q0, q1), h2 = Math.max(q0, q1);
+      const led = this.b.glow(opts.glow, 3);
+      if (face[1] === 'z') this.b.box([along + w / 2 - 0.08, y + h - 0.08, l2], [along + w / 2 - 0.04, y + h - 0.04, h2], led, { collide: false, shadow: false });
+      else this.b.box([l2, y + h - 0.08, along + w / 2 - 0.08], [h2, y + h - 0.04, along + w / 2 - 0.04], led, { collide: false, shadow: false });
+    }
+  }
+
+  /** Weeds and ferns in the cracks: along wall bases and kerbs, only on open ground at `y`. */
+  weeds(rect: Rect, y: number, n: number, opts: { clear?: Rect[] } = {}): number {
+    return this.scatter(rect, y, n, [['fern_02', 1, { scale: 0.35 }], ['shrub_04', 2, { scale: 1.1 }], ['shrub_02', 0.6, { scale: 0.25 }]], { clear: opts.clear });
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Beyond the map
 
   /**
@@ -565,9 +1007,9 @@ export class Dresser {
         cx = this.rand(bounds.min.x - far * 0.7, bounds.max.x + far * 0.7);
       }
       const h = this.rand(hMin, hMax) * (0.6 + 0.4 * (d / far));
-      this.b.box([cx - w / 2, base, cz - dep / 2], [cx + w / 2, base + h, cz + dep / 2], this.pick(mats), { collide: false, tile: 12 });
+      this.b.box([cx - w / 2, base, cz - dep / 2], [cx + w / 2, base + h, cz + dep / 2], this.pick(mats), { collide: false, tile: 12, shadow: false });
       // Red aircraft warning light on the tall ones
-      if (h > hMax * 0.7) this.b.box([cx - 0.3, base + h, cz - 0.3], [cx + 0.3, base + h + 0.4, cz + 0.3], this.b.glow(0xff3a2a, 3), { collide: false });
+      if (h > hMax * 0.7) this.b.box([cx - 0.3, base + h, cz - 0.3], [cx + 0.3, base + h + 0.4, cz + 0.3], this.b.glow(0xff3a2a, 3), { collide: false, shadow: false });
     }
   }
 }

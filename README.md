@@ -6,7 +6,7 @@ Browser FPS (Three.js + TypeScript + Vite) with a six-mission story campaign, **
 
 ```bash
 npm install
-npm run assets   # downloads the free CC0 assets (~130 MB) into public/assets
+npm run assets   # downloads the free CC0 assets (~450 MB) into public/assets
 npm run sounds   # (re)generates the sound effects into public/assets/audio
 npm run dev      # http://localhost:5173
 ```
@@ -32,6 +32,16 @@ How it is built:
   rails, floors with openings, lamps, doors that open at runtime, water sheets, and the
   environments (night rain, dusk, overcast, underground, storm, dawn storm) with rain and lightning.
   Maps are in `src/world/maps/`. Convention: y = 0 is the lowest walkable level of every map.
+- `src/world/dress.ts` is the set-dressing kit on top of it: facades, shop fronts, signs and
+  stencils drawn into one texture atlas, grime streaks, puddles, pipes, ducts, cable trays, pallets,
+  sandbags, bollards, validated prop scatter and the skyline. Dressing never changes collision
+  unless it says so.
+- `src/world/props.ts` draws the props. Sizes come from `src/world/props.json` (regenerate with
+  `node scripts/prop-bounds.mjs` after adding a model), so a map only loads the models it places.
+  Each part gets three levels of detail (meshoptimizer, capped triangle budgets), instances are
+  bucketed into 20 m cells for culling, small props disappear at distance, and all prop shadows
+  come from one merged low-detail mesh only the sun's shadow camera sees. A map's textures are
+  freed when it is unloaded. `await __perf('<mission>')` in the dev console reports frame cost.
 - `src/game/mission.ts` runs a mission: stages of tasks (reach, use, clear a group, hold for a
   time), spawn groups by faction, a radio queue, countdowns, rising water, checkpoints.
   The missions themselves are data plus small hooks in `src/game/missions/`.
@@ -125,7 +135,7 @@ Not networked yet, but the simulation runs in fixed 60 Hz ticks from serializabl
 
 ## Assets
 
-- Models, textures and HDRI: [Poly Haven](https://polyhaven.com) (CC0) — the story maps add twelve more texture sets and about forty set-dressing props, fetched by `npm run assets`
+- Models, textures and HDRI: [Poly Haven](https://polyhaven.com) (CC0) — the story maps add twelve more texture sets and about a hundred set-dressing props, fetched by `npm run assets`
 - "Classic M4" by [jeandiz](https://sketchfab.com/jeandiz) — [Sketchfab](https://sketchfab.com/3d-models/a747ebdbb3d941ecb09b459c62865a75), CC BY 4.0 (sling removed, lens faces removed, textures resized to 2K)
 - "Pistol 9mm - semi auto" by Hitansh_3DArtist (Sketchfab), CC BY 4.0 (exported through Blender with the muzzle down -Z, slide and magazine split into their own nodes). `public/assets/models/g19/g19.glb`
 - "PGM Ultima Ratio · Game-Ready Sniper Rifle" by flip.3d (Sketchfab), CC BY 4.0 (bipod and monopod removed, bolt and magazine split into their own nodes). `public/assets/models/ultima_ratio/ultima_ratio.glb`
