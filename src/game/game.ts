@@ -5,7 +5,7 @@ import { Input } from '../core/input';
 import { Renderer } from '../core/renderer';
 import { QUALITY_PRESETS, type QualityPreset, type Settings } from '../core/settings';
 import { EnemyManager, type Enemy } from '../enemies/enemies';
-import { TICK_DT, Btn, type HitZone, type Vec3 } from '../net/protocol';
+import { TICK_DT, Btn, type HitZone, type PlayerCommand, type Vec3 } from '../net/protocol';
 import { Player } from '../player/player';
 import { Hud } from '../ui/hud';
 import { FpArms } from '../weapons/arms';
@@ -14,13 +14,15 @@ import { Viewmodel } from '../weapons/viewmodel';
 import { WEAPONS } from '../weapons/weapons';
 import { CoverMap } from '../world/cover';
 import { Effects } from '../world/effects';
-import { buildMap, makeFog, surfaceAt, type WorldMap } from '../world/map';
+import { setActiveMap, surfaceAt, type WorldId, type WorldMap } from '../world/map';
+import { buildWorld } from '../world/worlds';
 import { initNavigation, NavSystem } from '../world/navmesh';
 import { lineOfSight, raycastBoxes } from '../world/physics';
 import { initPhysics, PhysicsWorld } from '../world/physics3d';
 import { LootManager, type InteractCandidate } from '../world/loot';
 import { CommandBuilder } from './commands';
 import { EventBus } from './events';
+import { MissionMode, type MissionDef, type SavedCheckpoint } from './mission';
 import { createMode, type GameMode, type ModeId } from './modes';
 
 const CALLSIGNS = ['Hostile', 'Insurgent', 'Gunman', 'Rifleman', 'Raider', 'Mercenary', 'Sentry'];
@@ -35,7 +37,7 @@ const FALLBACK_CLICKS = new Set(['mag_out', 'mag_in', 'charge_fwd', 'slide', 'bo
 const v3 = (v: THREE.Vector3): Vec3 => [v.x, v.y, v.z];
 const vec = (a: Vec3): THREE.Vector3 => new THREE.Vector3(a[0], a[1], a[2]);
 
-export type GameState = 'menu' | 'playing' | 'paused' | 'dead';
+export type GameState = 'menu' | 'playing' | 'paused' | 'dead' | 'complete';
 
 /**
  * Owns the world and runs the loop:
@@ -49,6 +51,9 @@ export class Game {
   private viewScene = new THREE.Scene();
   private viewCamera = new THREE.PerspectiveCamera(58, 1, 0.01, 10);
   private viewSun = new THREE.DirectionalLight(0xffc089, 2.6);
+  private viewHemi = new THREE.HemisphereLight(0x8fa6cf, 0x5a4636, 0.5);
+  private viewFill = new THREE.DirectionalLight(0xa9c1ee, 0.85);
+  private flashlight = new THREE.SpotLight(0xfff1dc, 0, 46, 0.5, 0.55, 1.5);
   private worldFlash = new THREE.PointLight(0xffb060, 0, 12, 2);
   readonly renderer: Renderer;
   readonly input: Input;
@@ -66,6 +71,15 @@ export class Game {
   private nav!: NavSystem;
   private cover!: CoverMap;
   private commands = new CommandBuilder();
+  /** The command the current tick ran on (missions read the interact button from it). */
+  lastCmd: PlayerCommand | null = null;
+  /** Where the player is looking, this tick. */
+  readonly aimDir = new THREE.Vector3(0, 0, -1);
+  /** How deep the player stands in water (m). */
+  waterDepth = 0;
+  private worldLoad: Promise<void> | null = null;
+  /** Why the mission ended, when it ended in failure rather than death. */
+  failReason: string | null = null;
   private wasAiming = false;
   mode: GameMode | null = null;
   state: GameState = 'menu';
@@ -84,6 +98,9 @@ export class Game {
 
   onStateChange: ((s: GameState) => void) | null = null;
   onGameOver: (() => void) | null = null;
+  onMissionComplete: ((m: MissionMode) => void) | null = null;
+  /** A story checkpoint was taken (store it so the chapter can be resumed). */
+  onCheckpoint: ((cp: SavedCheckpoint) => void) | null = null;
 
   constructor(container: HTMLElement, public settings: Settings) {
     this.preset = QUALITY_PRESETS[settings.quality];
@@ -93,12 +110,20 @@ export class Game {
     this.enemies = new EnemyManager(this.scene);
     this.effects = new Effects(this.scene, this.preset.decals);
     this.scene.add(this.camera, this.worldFlash);
-    this.viewScene.add(this.viewSun, new THREE.HemisphereLight(0x8fa6cf, 0x5a4636, 0.5));
+    this.viewScene.add(this.viewSun, this.viewHemi);
     // Sky fill fixed to the view, from above and behind the left shoulder: whichever way the
     // player faces, the gun's top edges catch a cool highlight and its shadow side keeps its shape.
-    const viewFill = new THREE.DirectionalLight(0xa9c1ee, 0.85);
-    viewFill.position.set(-1.6, 2.4, 1.2);
-    this.viewScene.add(viewFill);
+    this.viewFill.position.set(-1.6, 2.4, 1.2);
+    this.viewScene.add(this.viewFill);
+    // Carried light for the dark maps: rides on the camera, a little off the eye line
+    this.flashlight.position.set(0.18, -0.12, 0);
+    this.flashlight.target.position.set(0.1, -0.1, -6);
+    this.flashlight.shadow.mapSize.set(1024, 1024);
+    this.flashlight.shadow.camera.near = 0.3;
+    this.flashlight.shadow.camera.far = 46;
+    this.flashlight.shadow.bias = -0.002;
+    this.flashlight.visible = false;
+    this.camera.add(this.flashlight, this.flashlight.target);
 
     this.input.onUnlock = () => {
       if (this.state === 'playing') this.setState('paused');
@@ -108,7 +133,7 @@ export class Game {
 
   private setState(s: GameState): void {
     this.state = s;
-    this.hud.show(s === 'playing' || s === 'dead');
+    this.hud.show(s === 'playing' || s === 'dead' || s === 'complete');
     this.onStateChange?.(s);
   }
 
@@ -125,7 +150,7 @@ export class Game {
     this.enemies.onEnemyDeath = (enemy, def, ammo) => {
       this.loot.registerCasualty(enemy, def, Math.max(10, Math.floor(ammo * (0.6 + Math.random() * 0.4))));
     };
-    await Promise.all([this.loadMap(), this.enemies.load()]);
+    await Promise.all([this.loadWorld('compound'), this.enemies.load()]);
     const states: WeaponState[] = await Promise.all(WEAPONS.map(async (def, _idx) => ({
       def, mag: def.magSize, reserve: def.reserve, vm: await Viewmodel.create(def),
       unlocked: true, // all weapons available in wave survival; unlockable in story missions
@@ -140,24 +165,55 @@ export class Game {
     this.weapons.setVisible(false);
     this.renderer.apply(this.preset);
     this.renderer.gl.setAnimationLoop(() => this.frame());
-    // Idle menu camera
-    this.camera.position.set(-22, 9, 36);
-    this.camera.lookAt(4, 1, -6);
   }
 
-  private async loadMap(): Promise<void> {
-    this.map?.dispose();
-    this.map = await buildMap(this.scene, this.preset, this.renderer.gl);
-    this.renderer.setSun(this.map.sunDir, this.map.sunColor, 0.4, this.map.sun);
-    this.viewScene.environment = this.map.envMap;
-    this.viewScene.environmentIntensity = 0.9;
+  /** Make `id` the loaded map (no-op if it already is). Safe to call while another load runs. */
+  loadWorld(id: WorldId, force = false): Promise<void> {
+    const prev = this.worldLoad ?? Promise.resolve();
+    this.worldLoad = prev.catch(() => {}).then(async () => {
+      if (!force && this.map?.id === id) return;
+      this.enemies.clear();
+      this.effects.clear();
+      this.phys.clear();
+      this.loot.clear();
+      this.map?.dispose();
+      this.map = await buildWorld(id, this.scene, this.preset, this.renderer.gl);
+      setActiveMap(this.map);
+      const env = this.map.env;
+      // The lit haze is as bright as the light that makes it: almost nothing under a moon
+      const hazeColor = this.map.sunColor.clone().multiplyScalar(this.map.sun.intensity / 6.5);
+      this.renderer.setSun(this.map.sunDir, hazeColor, env.shafts, this.map.sun.castShadow ? this.map.sun : null);
+      this.viewScene.environment = this.map.envMap;
+      this.viewScene.environmentIntensity = 0.9 * Math.max(0.3, env.viewLight);
+      this.viewSun.color.copy(this.map.sunColor);
+      this.flashlight.visible = env.flashlight;
+      this.flashlight.intensity = env.flashlight ? 260 : 0;
+      this.flashlight.castShadow = env.flashlight && this.preset.shadows;
+      this.enemies.hearingScale = env.hearing;
+      this.rebuildNav();
+      this.weapons?.setObstacleColliders(this.map.colliders);
+      this.loadedTexRes = `${this.preset.textureRes}/${this.preset.hdriRes}`;
+      // New lights and fog: every material's program depends on them
+      if (this.weapons) this.renderer.apply(this.preset);
+    });
+    return this.worldLoad;
+  }
+
+  /** Bake navigation, cover and physics statics from the map's colliders as they are now. */
+  private rebuildNav(): void {
     this.nav?.dispose();
-    this.nav = new NavSystem(this.map.bounds, this.map.colliders);
+    this.nav = new NavSystem(this.map.bounds, this.map.colliders, this.map.navGround);
     this.enemies.nav = this.nav;
-    this.cover = new CoverMap(this.map.colliders, this.nav);
+    this.cover = new CoverMap(this.map.colliders, this.nav, this.map.bounds);
     this.phys.setStatics(this.map.colliders);
-    this.weapons?.setObstacleColliders(this.map.colliders);
-    this.loadedTexRes = `${this.preset.textureRes}/${this.preset.hdriRes}`;
+    for (const e of this.enemies.enemies) {
+      if (!e.dead) e.agent = this.nav.addAgent(e.position, e.stats.speed);
+    }
+  }
+
+  /** Open or close a door or shutter on the map; paths and cover are rebuilt around it. */
+  setDoor(id: string, open: boolean): void {
+    if (this.map.setDoor(id, open)) this.rebuildNav();
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -199,7 +255,7 @@ export class Game {
       this.audio?.flesh(p);
       this.audio?.hitMarker(head, e.killed);
       this.hud.hit(head, e.killed);
-      if (e.killed) this.hud.killFeed(CALLSIGNS[e.target % CALLSIGNS.length], head);
+      if (e.killed) this.hud.killFeed(this.enemies.enemies.find((x) => x.id === e.target)?.label || CALLSIGNS[e.target % CALLSIGNS.length], head);
     });
     ev.on('playerHurt', (e) => {
       const from = vec(e.from);
@@ -290,32 +346,38 @@ export class Game {
     this.hud.setFpsVisible(s.showFps);
     this.effects.setMaxDecals(this.preset.decals);
     if (this.map && `${this.preset.textureRes}/${this.preset.hdriRes}` !== this.loadedTexRes) {
-      this.enemies.clear();
-      await this.loadMap();
+      await this.loadWorld(this.map.id, true);
     }
     const sun = this.map.sun;
-    sun.castShadow = this.preset.shadows;
+    sun.castShadow = this.preset.shadows && sun.intensity > 0;
+    this.flashlight.castShadow = this.map.env.flashlight && this.preset.shadows;
     if (sun.shadow.mapSize.x !== this.preset.shadowMapSize) {
       sun.shadow.mapSize.set(this.preset.shadowMapSize, this.preset.shadowMapSize);
       sun.shadow.map?.dispose();
       sun.shadow.map = null;
     }
-    this.scene.fog = makeFog();
     this.renderer.apply(this.preset);
   }
 
-  start(modeId: ModeId): void {
+  /** Start a mode on the map that is loaded. Story missions pass their definition. */
+  start(modeId: ModeId, mission?: MissionDef, resume?: SavedCheckpoint | null): void {
     this.ensureAudio();
+    this.failReason = null;
     this.enemies.clear();
     this.effects.clear();
     this.phys.clear();
     this.loot.clear();
     this.hud.clearFeed();
     const sp = this.map.playerSpawns[Math.floor(Math.random() * this.map.playerSpawns.length)];
-    this.player.spawn(sp, 0);
-    this.weapons.reset();
+    this.player.spawn(sp, this.map.spawnYaw);
+    this.weapons.reset(mission?.loadout);
     this.weapons.setVisible(true);
-    this.mode = createMode(modeId);
+    this.hud.setStory(false);
+    if (mission) {
+      const m = new MissionMode(mission, resume ?? null);
+      m.onCheckpoint = (cp) => this.onCheckpoint?.(cp);
+      this.mode = m;
+    } else this.mode = createMode(modeId);
     this.weapons.infiniteAmmo = this.mode.infiniteAmmo;
     this.mode.start(this);
     this.camera.fov = this.settings.fov;
@@ -329,10 +391,60 @@ export class Game {
     this.input.lock();
     this.lastTime = performance.now();
     this.setState('playing');
+    // The browser can refuse the pointer lock (no recent click, e.g. after a long load): fall
+    // back to the pause screen, whose Resume button is a fresh click
+    setTimeout(() => {
+      if (this.state === 'playing' && !this.input.locked && !this.fixedDt) this.setState('paused');
+    }, 600);
+  }
+
+  /** Story: back to the last checkpoint after dying or failing. */
+  restartCheckpoint(): void {
+    if (!(this.mode instanceof MissionMode)) return;
+    this.failReason = null;
+    this.enemies.clear();
+    this.effects.clear();
+    this.phys.clear();
+    this.loot.clear();
+    this.hud.clearFeed();
+    this.mode.restore();
+    this.acc = 0;
+    this.resume();
+  }
+
+  /** Mission scripting: the mission is lost for a reason other than the player dying. */
+  failMission(reason: string): void {
+    if (this.state !== 'playing') return;
+    this.failReason = reason;
+    this.deadT = 1.2;
+    this.setState('dead');
+  }
+
+  completeMission(): void {
+    if (!(this.mode instanceof MissionMode)) return;
+    this.input.unlock();
+    this.setState('complete');
+    this.onMissionComplete?.(this.mode);
+  }
+
+  /** Mission scripting: a bot (friendly or not) is shot dead from `from`. */
+  dropBot(e: Enemy, from: THREE.Vector3): void {
+    if (e.dead) return;
+    e.friendly = false;
+    const dir = e.position.clone().sub(from).setY(0).normalize();
+    e.damage(99999, dir, from, 'head', e.eye, { squad: this.enemies.squad, events: this.events });
+    this.enemies.onDeath(e, { cover: this.cover });
+  }
+
+  /** Damage from the world (water, scripted hazards). */
+  hurtPlayer(dmg: number, from: THREE.Vector3): void {
+    this.onPlayerHit(dmg, from);
   }
 
   quitToMenu(): void {
     this.input.unlock();
+    this.hud.setStory(false);
+    this.audio?.setRain(0);
     this.enemies.clear();
     this.effects.clear();
     this.phys.clear();
@@ -340,8 +452,6 @@ export class Game {
     this.activeInteract = null;
     this.hud.setInteractPrompt(null);
     this.mode = null;
-    this.camera.position.set(-22, 9, 36);
-    this.camera.lookAt(4, 1, -6);
     this.camera.fov = 70;
     this.camera.updateProjectionMatrix();
     this.weapons.setVisible(false);
@@ -354,7 +464,7 @@ export class Game {
     const candidates = this.map.enemySpawns
       .map((p) => ({ p, d: p.distanceTo(this.player.position) }))
       .filter((c) => c.d > 16)
-      .filter((c) => allowVisible || !lineOfSight(c.p.clone().setY(1.6), eye, this.map.colliders));
+      .filter((c) => allowVisible || !lineOfSight(c.p.clone().setY(c.p.y + 1.6), eye, this.map.colliders));
     const pool = candidates.length ? candidates : this.map.enemySpawns.map((p) => ({ p, d: 0 }));
     if (!pool.length) return null;
     const pick = pool[Math.floor(Math.random() * pool.length)].p.clone();
@@ -419,7 +529,8 @@ export class Game {
       return;
     }
     const drop = point.clone().addScaledVector(dir.clone().setY(0).normalize(), 0.6 + Math.random() * 1.2);
-    drop.y = 0.005;
+    const floor = raycastBoxes(drop, new THREE.Vector3(0, -1, 0), 3, this.map.colliders);
+    drop.y = (floor ? floor.point.y : 0) + 0.005;
     this.effects.bloodSplat(drop, new THREE.Vector3(0, 1, 0), size * 0.8);
   }
 
@@ -461,14 +572,23 @@ export class Game {
 
   private simulate(dt: number): void {
     const cmd = this.commands.build(this.input, this.tick++, this.player.yaw, this.player.pitch);
+    this.lastCmd = cmd;
     this.time += dt;
     if (!this.mode) return;
     const aiming = this.weapons.aiming;
-    this.player.simulate(cmd, dt, this.map.colliders, aiming);
+    // Standing water: wading is slow
+    this.waterDepth = 0;
+    const pp = this.player.position;
+    for (const w of this.map.waters) {
+      if (pp.x > w.rect[0] && pp.x < w.rect[2] && pp.z > w.rect[1] && pp.z < w.rect[3]) this.waterDepth = Math.max(this.waterDepth, w.level - pp.y);
+    }
+    const wade = this.waterDepth > 0.35 ? THREE.MathUtils.lerp(0.85, 0.45, Math.min(1, (this.waterDepth - 0.35) / 0.9)) : 1;
+    this.player.simulate(cmd, dt, this.map.colliders, aiming, wade);
     const shots = this.weapons.tick(cmd, dt, this.player);
     for (const s of shots) this.handleShot(s);
+    const aimDir = this.aimDir.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
     if (this.state === 'playing') this.mode.update(this, dt);
-    const aimDir = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    if (this.state !== 'playing' && this.state !== 'dead') return;
 
     // Loot query & interaction
     if (this.player.alive) {
@@ -486,6 +606,7 @@ export class Game {
       time: this.time, player: this.player, playerAim: { origin: this.player.eye, dir: aimDir, ads: aiming },
       nav: this.nav, cover: this.cover, colliders: this.map.colliders, audio: this.audio, effects: this.effects,
       events: this.events, onPlayerHit: (d: number, f: THREE.Vector3) => this.onPlayerHit(d, f),
+      sightScale: this.map.env.sight * (this.mode.sightScale ?? 1) * (1 + this.map.flash * 2),
     };
     this.enemies.tick(dt, ctx);
     this.enemies.grenades.tick(dt, { ...ctx, enemies: this.enemies.enemies, squad: this.enemies.squad, grenades: this.enemies.grenades },
@@ -503,7 +624,7 @@ export class Game {
     const now = performance.now();
     const dt = this.fixedDt ?? Math.min(0.1, (now - this.lastTime) / 1000);
     this.lastTime = now;
-    const playing = (this.state === 'playing' || this.state === 'dead') && !!this.mode;
+    const playing = (this.state === 'playing' || this.state === 'dead' || this.state === 'complete') && !!this.mode;
 
     if (playing) {
       // Mouse look is applied every frame for responsiveness; the sim reads the angles per tick.
@@ -549,11 +670,12 @@ export class Game {
       });
       this.hud.setScope(this.weapons.scoped, this.weapons.breath / 4);
       this.hud.grenades(this.enemies.grenades.positions, this.camera, this.player.position);
-      this.hud.setInteractPrompt(this.player.alive && this.activeInteract ? {
+      this.mode!.render?.(this);
+      this.hud.setInteractPrompt(!this.player.alive ? null : this.mode!.interactPrompt?.() ?? (this.activeInteract ? {
         key: this.activeInteract.promptKey,
         action: this.activeInteract.promptAction,
         detail: this.activeInteract.promptDetail,
-      } : null);
+      } : null));
       this.audio.updateListener(this.camera);
       this.audio.setHealth(this.player.health / 100);
       if (this.weapons.aiming !== this.wasAiming) {
@@ -573,12 +695,13 @@ export class Game {
     } else if (this.state === 'menu') {
       // Slow orbit on the menu
       const t = performance.now() * 0.00004;
-      this.camera.position.set(Math.sin(t) * 24, 13, Math.cos(t) * 24);
-      this.camera.lookAt(0, 1.5, 0);
+      const mc = this.map.menuCam;
+      this.camera.position.set(mc.center.x + Math.sin(t) * mc.radius, mc.height, mc.center.z + Math.cos(t) * mc.radius);
+      this.camera.lookAt(mc.center);
     }
 
     this.effects.update(dt);
-    this.map.update(dt, this.camera.position);
+    this.map.update(dt, this.camera.position, this.mode ? this.audio : undefined);
     this.syncViewLighting();
     this.renderer.render(dt);
     this.input.endFrame();
@@ -589,6 +712,11 @@ export class Game {
     const inv = this.camera.quaternion.clone().invert();
     const sunDir = this.map.sun.position.clone().sub(this.map.sun.target.position).normalize();
     this.viewSun.position.copy(sunDir.applyQuaternion(inv)).multiplyScalar(5);
+    // The gun is lit like the place it is in: dim at night, flaring with lightning
+    const k = this.map.env.viewLight * (1 + this.map.flash * 5) + (this.map.env.flashlight ? 0.25 : 0);
+    this.viewSun.intensity = 2.6 * k * (this.map.sun.intensity > 0 ? 1 : 0.15);
+    this.viewHemi.intensity = 0.5 * k;
+    this.viewFill.intensity = 0.85 * k;
     this.viewScene.environmentRotation.setFromQuaternion(inv);
   }
 

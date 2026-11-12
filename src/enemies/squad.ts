@@ -32,7 +32,7 @@ export class Squad {
 
   /** A bot reports what it knows; it reaches the others after `delay` seconds. */
   report(pos: THREE.Vector3, vel: THREE.Vector3, confirmed: boolean, delay = 0.6): void {
-    this.pending.push({ pos: pos.clone().setY(0), vel: vel.clone(), delay, confirmed });
+    this.pending.push({ pos: pos.clone(), vel: vel.clone(), delay, confirmed });
   }
 
   update(dt: number): void {

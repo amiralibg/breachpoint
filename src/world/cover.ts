@@ -19,25 +19,29 @@ const STAND_EYE = 1.6;
 export class CoverMap {
   readonly points: CoverPoint[] = [];
 
-  constructor(colliders: THREE.Box3[], nav: NavSystem, private colliderList = colliders) {
+  /** Works on every floor: an obstacle's cover points sit on whatever it stands on. */
+  constructor(colliders: THREE.Box3[], nav: NavSystem, bounds?: THREE.Box3, private colliderList = colliders) {
+    const lim = bounds ?? new THREE.Box3(new THREE.Vector3(-39, 0, -39), new THREE.Vector3(39, 0, 39));
     for (const b of colliders) {
-      const h = b.max.y - Math.max(0, b.min.y);
-      if (b.min.y > 0.3 || h < 1.0) continue;
-      const low = b.max.y < 1.5;
+      const base = Math.max(0, b.min.y);
+      const h = b.max.y - base;
+      if (h < 1.0) continue;
+      const low = h < 1.5;
       const sides: [THREE.Vector3, THREE.Vector3, number, THREE.Vector3][] = [
         // origin, direction along side, length, outward normal
-        [new THREE.Vector3(b.min.x, 0, b.min.z), new THREE.Vector3(1, 0, 0), b.max.x - b.min.x, new THREE.Vector3(0, 0, -1)],
-        [new THREE.Vector3(b.min.x, 0, b.max.z), new THREE.Vector3(1, 0, 0), b.max.x - b.min.x, new THREE.Vector3(0, 0, 1)],
-        [new THREE.Vector3(b.min.x, 0, b.min.z), new THREE.Vector3(0, 0, 1), b.max.z - b.min.z, new THREE.Vector3(-1, 0, 0)],
-        [new THREE.Vector3(b.max.x, 0, b.min.z), new THREE.Vector3(0, 0, 1), b.max.z - b.min.z, new THREE.Vector3(1, 0, 0)],
+        [new THREE.Vector3(b.min.x, base, b.min.z), new THREE.Vector3(1, 0, 0), b.max.x - b.min.x, new THREE.Vector3(0, 0, -1)],
+        [new THREE.Vector3(b.min.x, base, b.max.z), new THREE.Vector3(1, 0, 0), b.max.x - b.min.x, new THREE.Vector3(0, 0, 1)],
+        [new THREE.Vector3(b.min.x, base, b.min.z), new THREE.Vector3(0, 0, 1), b.max.z - b.min.z, new THREE.Vector3(-1, 0, 0)],
+        [new THREE.Vector3(b.max.x, base, b.min.z), new THREE.Vector3(0, 0, 1), b.max.z - b.min.z, new THREE.Vector3(1, 0, 0)],
       ];
       for (const [o, dir, len, n] of sides) {
-        const count = Math.max(1, Math.floor(len / 1.6));
+        // Long walls get sparser points: a 60 m wall is not 37 places to hide
+        const count = Math.max(1, Math.min(8, Math.floor(len / 1.6)));
         for (let i = 0; i < count; i++) {
           const t = (i + 0.5) / count;
           const p = o.clone().addScaledVector(dir, len * t).addScaledVector(n, 0.75);
           if (!nav.walkable(p, 0.35)) continue;
-          if (Math.abs(p.x) > 39 || Math.abs(p.z) > 39) continue;
+          if (p.x < lim.min.x + 1 || p.x > lim.max.x - 1 || p.z < lim.min.z + 1 || p.z > lim.max.z - 1) continue;
           this.points.push({ pos: p, normal: n.clone(), low, claimedBy: null });
         }
       }
@@ -48,20 +52,20 @@ export class CoverMap {
   protects(c: CoverPoint, threat: THREE.Vector3): boolean {
     const toThreat = new THREE.Vector3().subVectors(threat, c.pos).setY(0).normalize();
     if (toThreat.dot(c.normal) > -0.3) return false; // obstacle must be between us
-    const eye = c.pos.clone().setY(c.low ? LOW_EYE : STAND_EYE);
-    return !lineOfSight(eye, threat.clone().setY(1.5), this.colliderList);
+    const eye = c.pos.clone().setY(c.pos.y + (c.low ? LOW_EYE : STAND_EYE));
+    return !lineOfSight(eye, threat.clone().setY(threat.y + 1.5), this.colliderList);
   }
 
   /** Can a bot at this point shoot the threat (standing up / stepping out)? */
   peekPosition(c: CoverPoint, threat: THREE.Vector3): THREE.Vector3 | null {
-    const t = threat.clone().setY(1.5);
+    const t = threat.clone().setY(threat.y + 1.5);
     if (c.low) {
-      return lineOfSight(c.pos.clone().setY(STAND_EYE), t, this.colliderList) ? c.pos : null;
+      return lineOfSight(c.pos.clone().setY(c.pos.y + STAND_EYE), t, this.colliderList) ? c.pos : null;
     }
     const side = new THREE.Vector3(-c.normal.z, 0, c.normal.x);
     for (const s of [1.1, -1.1, 1.8, -1.8]) {
       const p = c.pos.clone().addScaledVector(side, s);
-      if (lineOfSight(p.clone().setY(STAND_EYE), t, this.colliderList)) return p;
+      if (lineOfSight(p.clone().setY(c.pos.y + STAND_EYE), t, this.colliderList)) return p;
     }
     return null;
   }
@@ -81,8 +85,11 @@ export class CoverMap {
     flankDir?: THREE.Vector3; needPeek?: boolean; avoid?: THREE.Vector3[];
   }, limit = 4): CoverPoint[] {
     const scored: { c: CoverPoint; s: number }[] = [];
+    const taken = this.points.filter((o) => o.claimedBy && o.claimedBy !== opts.owner);
     for (const c of this.points) {
       if (c.claimedBy && c.claimedBy !== opts.owner) continue;
+      // Cover on the bot's own floor (or one flight away), not straight above or below it
+      if (Math.abs(c.pos.y - opts.from.y) > 3.6) continue;
       const dThreat = c.pos.distanceTo(opts.threat);
       if (dThreat < opts.minDist || dThreat > opts.maxDist) continue;
       const travel = c.pos.distanceTo(opts.from);
@@ -96,9 +103,7 @@ export class CoverMap {
         score -= dir.dot(opts.flankDir) * 12;
       }
       // Avoid bunching up with other claimed points (one grenade shouldn't get two bots)
-      for (const o of this.points) {
-        if (o !== c && o.claimedBy && o.claimedBy !== opts.owner && o.pos.distanceToSquared(c.pos) < 16) score += 5;
-      }
+      for (const o of taken) if (o.pos.distanceToSquared(c.pos) < 16) score += 5;
       for (const a of opts.avoid ?? []) if (a.distanceToSquared(c.pos) < 36) score += 8;
       score += Math.random() * 1.5;
       scored.push({ c, s: score });

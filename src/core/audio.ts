@@ -531,6 +531,83 @@ export class Audio {
     this.noiseBurst(dest, t, 0.04, 0.2, 5000, 1500);
   }
 
+  private rainGain: GainNode | null = null;
+  private rainLevel = 0;
+
+  /** Steady rain: filtered noise, 0 = off. Call every frame; it only moves the gain. */
+  setRain(level: number): void {
+    if (!this.rainGain) {
+      if (level <= 0) return;
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.noise;
+      src.loop = true;
+      const hp = this.ctx.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.value = 900;
+      const lp = this.ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 6500;
+      this.rainGain = this.ctx.createGain();
+      this.rainGain.gain.value = 0;
+      src.connect(hp).connect(lp).connect(this.rainGain).connect(this.bus);
+      src.start();
+    }
+    if (Math.abs(level - this.rainLevel) < 0.01) return;
+    this.rainLevel = level;
+    this.rainGain.gain.setTargetAtTime(level * 0.085, this.ctx.currentTime, 0.4);
+  }
+
+  /** Thunder: a crack, then a long low roll. */
+  thunder(): void {
+    const t = this.ctx.currentTime;
+    const dest = this.out({ wet: 0.5 });
+    this.noiseBurst(dest, t, 0.25, 0.5, 3000, 300, 0.8);
+    this.noiseBurst(dest, t + 0.05, 3.8, 0.75, 420, 35);
+    this.noiseBurst(dest, t + 0.9, 3.2, 0.4, 260, 30);
+    this.thump(dest, t, 55, 1.6, 0.55);
+  }
+
+  /** Radio squelch: `open` before a line, the tail click after it. */
+  radio(open = true): void {
+    const t = this.ctx.currentTime;
+    this.noiseBurst(this.master, t, open ? 0.09 : 0.05, 0.09, 4200, 2600, 3);
+    const o = this.ctx.createOscillator();
+    o.type = 'square';
+    o.frequency.value = open ? 1320 : 880;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.02, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
+    o.connect(g).connect(this.master);
+    o.start(t);
+    o.stop(t + 0.08);
+  }
+
+  /** Objective done / new objective. */
+  chime(done = true): void {
+    const t = this.ctx.currentTime;
+    (done ? [660, 990] : [520]).forEach((f, i) => {
+      const o = this.ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = f;
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t + i * 0.11);
+      g.gain.exponentialRampToValueAtTime(0.07, t + i * 0.11 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.11 + 0.5);
+      o.connect(g).connect(this.master);
+      o.start(t + i * 0.11);
+      o.stop(t + i * 0.11 + 0.55);
+    });
+  }
+
+  /** Heavy machinery: a valve wheel, a shutter, a gate drive. */
+  machine(pos?: THREE.Vector3): void {
+    const t = this.ctx.currentTime;
+    const dest = this.out({ pos, wet: 0.5, ref: 8 });
+    this.noiseBurst(dest, t, 1.4, 0.5, 900, 120, 2);
+    this.thump(dest, t + 0.05, 90, 0.5, 0.8);
+    this.thump(dest, t + 1.1, 60, 0.7, 0.9);
+  }
+
   waveHorn(): void {
     const t = this.ctx.currentTime;
     for (const f of [110, 165]) {

@@ -25,9 +25,11 @@ export class NavSystem {
   readonly navMesh: NavMesh;
   readonly query: NavMeshQuery;
   readonly crowd: Crowd;
-  private ext = { x: 2, y: 4, z: 2 };
+  private ext = { x: 2, y: 1.2, z: 2 };
+  private extTall = { x: 2, y: 4, z: 2 };
 
-  constructor(bounds: THREE.Box3, colliders: THREE.Box3[]) {
+  /** `ground`: rectangles [x0, z0, x1, z1] of walkable ground at y = 0 (default: the whole map). */
+  constructor(bounds: THREE.Box3, colliders: THREE.Box3[], ground?: [number, number, number, number][]) {
     const positions: number[] = [];
     const indices: number[] = [];
     const quad = (a: number[], b: number[], c: number[], d: number[]): void => {
@@ -37,8 +39,8 @@ export class NavSystem {
     };
     // Ground (counter-clockwise seen from above = facing up)
     const m = 2;
-    const [x0, z0, x1, z1] = [bounds.min.x - m, bounds.min.z - m, bounds.max.x + m, bounds.max.z + m];
-    quad([x0, 0, z0], [x0, 0, z1], [x1, 0, z1], [x1, 0, z0]);
+    const rects = ground ?? [[bounds.min.x - m, bounds.min.z - m, bounds.max.x + m, bounds.max.z + m]];
+    for (const [x0, z0, x1, z1] of rects) quad([x0, 0, z0], [x0, 0, z1], [x1, 0, z1], [x1, 0, z0]);
     // Each collider as a closed box
     for (const b of colliders) {
       const { min: n, max: x } = b;
@@ -53,27 +55,33 @@ export class NavSystem {
       ch: CH,
       walkableSlopeAngle: 40,
       walkableHeight: Math.ceil(1.7 / CH),
-      walkableClimb: Math.floor(0.35 / CH),
+      // Half a metre, the same as the player's step. Recast also rejects a cell whose two
+      // opposite neighbours differ by more than this, which is what limits how steep stairs can be
+      // (level.ts keeps treads at 0.45 m for that reason).
+      walkableClimb: Math.round(0.5 / CH),
       walkableRadius: Math.ceil(AGENT_RADIUS / CS),
       maxEdgeLen: 12 / CS,
       maxSimplificationError: 1.3,
       minRegionArea: 8,
       mergeRegionArea: 20,
       maxVertsPerPoly: 6,
-      detailSampleDist: 6,
-      detailSampleMaxError: 1,
+      detailSampleDist: 2,
+      detailSampleMaxError: 0.25,
     });
     if (!res.success) throw new Error(`navmesh generation failed: ${res.error}`);
     this.navMesh = res.navMesh;
     this.query = new NavMeshQuery(this.navMesh);
-    this.crowd = new Crowd(this.navMesh, { maxAgents: 48, maxAgentRadius: 0.6 });
+    this.crowd = new Crowd(this.navMesh, { maxAgents: 64, maxAgentRadius: 0.6 });
   }
 
-  /** Straight path from a to b, ground level (excludes the start point). */
+  /** Corner points of the path from a to b across floors and stairs (excludes the start point). */
   findPath(a: THREE.Vector3, b: THREE.Vector3): THREE.Vector3[] {
     const r = this.query.computePath(a, b, { halfExtents: this.ext });
-    if (!r.success) return [];
-    return r.path.slice(1).map((p) => new THREE.Vector3(p.x, 0, p.z));
+    if (!r.success || !r.path.length) return [];
+    // A partial path (Detour's best effort toward an unreachable goal) is no path
+    const end = r.path[r.path.length - 1];
+    if (Math.hypot(end.x - b.x, end.z - b.z) > 2.5 || Math.abs(end.y - b.y) > 2) return [];
+    return r.path.slice(1).map((p) => new THREE.Vector3(p.x, Math.abs(p.y) < 0.15 ? 0 : p.y, p.z));
   }
 
   /** Path length (m), or Infinity when unreachable. */
@@ -81,7 +89,7 @@ export class NavSystem {
     const pts = this.findPath(a, b);
     if (!pts.length) return Infinity;
     let len = 0;
-    let prev = a.clone().setY(0);
+    let prev = a.clone();
     for (const p of pts) {
       len += prev.distanceTo(p);
       prev = p;
@@ -89,9 +97,10 @@ export class NavSystem {
     return len;
   }
 
-  /** Nearest point on the navmesh, or null when nothing is within ~2 m. */
+  /** Nearest point on the navmesh (on the same floor if there is one), or null when nothing is within ~2 m. */
   closest(p: THREE.Vector3): THREE.Vector3 | null {
-    const r = this.query.findClosestPoint(p, { halfExtents: this.ext });
+    let r = this.query.findClosestPoint(p, { halfExtents: this.ext });
+    if (!r.success || !r.polyRef) r = this.query.findClosestPoint(p, { halfExtents: this.extTall });
     if (!r.success || !r.polyRef) return null;
     return new THREE.Vector3(r.point.x, r.point.y, r.point.z);
   }

@@ -219,13 +219,36 @@ export class WeaponController {
     if (this.arms) this.arms.visible = on;
   }
 
-  reset(): void {
+  /** Full ammo. `loadout` lists the weapon ids the player carries (default: all of them). */
+  reset(loadout?: string[]): void {
     for (const w of this.weapons) {
       w.mag = w.def.magSize;
       w.reserve = w.def.reserve;
+      w.unlocked = !loadout || loadout.includes(w.def.id);
     }
     this.aimBlend = 0;
-    this.select(0);
+    this.action = 'idle';
+    this.select(Math.max(0, this.weapons.findIndex((w) => w.unlocked)));
+  }
+
+  /** Ammo and carried weapons, for mission checkpoints. */
+  snapshot(): { mag: number; reserve: number; unlocked: boolean }[] {
+    return this.weapons.map((w) => ({ mag: w.mag, reserve: w.reserve, unlocked: w.unlocked }));
+  }
+
+  restore(snap: { mag: number; reserve: number; unlocked: boolean }[], slot: number): void {
+    this.weapons.forEach((w, i) => {
+      const s = snap[i];
+      if (!s) return;
+      // Coming back from a checkpoint with an empty gun is no fun: at least two magazines
+      w.mag = Math.max(s.mag, Math.min(w.def.magSize, s.mag + s.reserve));
+      w.reserve = Math.max(s.reserve, w.def.magSize * 2);
+      w.unlocked = s.unlocked;
+    });
+    this.aimBlend = 0;
+    this.action = 'idle';
+    this.outOfAmmo = false;
+    this.select(this.weapons[slot]?.unlocked ? slot : Math.max(0, this.weapons.findIndex((w) => w.unlocked)));
   }
 
   refillReserve(): void {
@@ -704,7 +727,8 @@ export class WeaponController {
       vm.setPartVisible(role, shown ?? !(d.hiddenParts ?? []).includes(role));
     }
     // The magazine in hand is loaded unless it is the empty one on its way out
-    vm.setRoundVisible(w.mag > 0 || (this.action === 'reload' && animT > 0.8));
+    // (a fresh one comes into view once the timeline stops hiding the magazine, else after 0.8 s)
+    vm.setRoundVisible(w.mag > 0 || (this.action === 'reload' && animT > (this.anim.tl?.hide?.mag?.[1] ?? 0.8)));
     this.anim.t = animT;
 
     vm.group.position.copy(pos);

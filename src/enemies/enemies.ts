@@ -38,7 +38,7 @@ export interface EnemyHit {
   point: THREE.Vector3;
 }
 
-type Role = 'rifleman' | 'flanker' | 'rusher' | 'marksman';
+export type Role = 'rifleman' | 'flanker' | 'rusher' | 'marksman';
 /** What the bot is doing (also shown by the F3 debug overlay). */
 export type State =
   | 'patrol' | 'investigate' | 'search' | 'moveCover' | 'cover' | 'peek' | 'engage' | 'suppress'
@@ -62,6 +62,8 @@ export interface EnemyCtx {
   effects: Effects;
   events: EventBus;
   onPlayerHit: (damage: number, from: THREE.Vector3, zone: HitZone) => void;
+  /** Darkness and weather: multiplies how far and how quickly bots see (1 = clear daylight). */
+  sightScale?: number;
   enemies: Enemy[];
   squad: Squad;
   grenades: GrenadeSystem;
@@ -132,6 +134,16 @@ export class Enemy {
   private flankCd = 4 + Math.random() * 6;
   bloodPooled = false;
   readonly weaponDef: WeaponDef;
+  /** Posted bots stay within `leash` metres of `home` until they have something to fight. */
+  home: THREE.Vector3 | null = null;
+  leash = 7;
+  /** Mission tag (spawn group name). */
+  group = '';
+  /** Friendly NPCs can't be hurt, never shoot, and follow the player when `follow` is set. */
+  friendly = false;
+  follow = false;
+  /** Display name for the kill feed, if any. */
+  label = '';
 
   constructor(proto: CharacterProto, gun: THREE.Object3D, muzzleZ: number, spawn: THREE.Vector3, readonly stats: EnemyStats,
     scene: THREE.Scene, role: Role, phys: PhysicsWorld | null, weaponDef: WeaponDef = WEAPONS[0]) {
@@ -160,6 +172,18 @@ export class Enemy {
     this.lastProgress.copy(spawn);
   }
 
+  setFacing(yaw: number): void {
+    this.facing = this.renderFacing = yaw;
+  }
+
+  /** Mission scripting: this bot now knows exactly where the player is. */
+  alert(p: THREE.Vector3): void {
+    this.known.copy(p);
+    this.sinceKnown = 0;
+    this.combat = true;
+    this.awareness = Math.max(this.awareness, 0.85);
+  }
+
   get eye(): THREE.Vector3 {
     return this.position.clone().setY(this.position.y + (this.rig.crouch > 0.5 ? 1.05 : 1.6));
   }
@@ -174,10 +198,10 @@ export class Enemy {
 
   /** Returns true if this killed the enemy. */
   damage(amount: number, dir: THREE.Vector3, from: THREE.Vector3, zone: HitZone, point: THREE.Vector3, ctx: Pick<EnemyCtx, 'squad' | 'events'>): boolean {
-    if (this.dead) return false;
+    if (this.dead || this.friendly) return false;
     this.health -= amount;
     // Getting shot reveals roughly where the shooter is and wakes the bot up immediately.
-    this.known.copy(from).setY(0);
+    this.known.copy(from);
     this.sinceKnown = 0;
     this.awareness = 1;
     this.combat = true;
@@ -211,7 +235,7 @@ export class Enemy {
   hear(pos: THREE.Vector3, certainty: number): void {
     if (this.sees) return;
     const err = (1 - certainty) * 6;
-    const guess = pos.clone().add(new THREE.Vector3((Math.random() - 0.5) * err, 0, (Math.random() - 0.5) * err)).setY(0);
+    const guess = pos.clone().add(new THREE.Vector3((Math.random() - 0.5) * err, 0, (Math.random() - 0.5) * err));
     if (this.sinceKnown > 1.5 || certainty > 0.6) {
       this.known.copy(guess);
       this.knownVel.set(0, 0, 0);
@@ -223,7 +247,7 @@ export class Enemy {
 
   /** Start the round knowing roughly where the player is (within ~12 m). */
   hunt(p: THREE.Vector3): void {
-    this.known.copy(p).add(new THREE.Vector3((Math.random() - 0.5) * 24, 0, (Math.random() - 0.5) * 24)).setY(0);
+    this.known.copy(p).add(new THREE.Vector3((Math.random() - 0.5) * 24, 0, (Math.random() - 0.5) * 24));
     this.sinceKnown = 6;
     this.combat = true;
     this.awareness = 0.6;
@@ -263,7 +287,13 @@ export class Enemy {
   syncFromAgent(ctx: EnemyCtx): void {
     if (this.dead || !this.agent) return;
     const p = this.agent.position();
-    this.position.set(p.x, Math.abs(p.y) < 0.3 ? 0 : p.y, p.z);
+    let y = Math.abs(p.y) < 0.3 ? 0 : p.y;
+    if (y > 0) {
+      // The navmesh smooths stairs into a slope: stand on the actual tread or floor
+      const down = raycastBoxes(_feet.set(p.x, y + 0.9, p.z), _down, 1.8, ctx.colliders);
+      if (down) y = down.point.y;
+    }
+    this.position.set(p.x, y, p.z);
     // Keep out of the player's body
     const pp = ctx.player.position;
     const dx = this.position.x - pp.x, dz = this.position.z - pp.z;
@@ -286,7 +316,8 @@ export class Enemy {
       this.perceiveT = 0.1 + Math.random() * 0.05;
       let frac = 0;
       const dist = this.position.distanceTo(p.position);
-      if (p.alive && dist < SIGHT_RANGE) {
+      const sight = ctx.sightScale ?? 1;
+      if (p.alive && dist < SIGHT_RANGE * sight) {
         const eye = this.eye;
         const fwd = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
         const to = new THREE.Vector3().subVectors(p.position, this.position).setY(0).normalize();
@@ -301,7 +332,7 @@ export class Enemy {
           if (frac > 0) {
             // Awareness gain: distance, angle, stance, movement and muzzle flashes all matter
             const central = cos > 0.5 ? 1 : cos > 0 ? 0.55 : 0.25;
-            const range = THREE.MathUtils.clamp(1.4 - dist / 45, 0.12, 1.4);
+            const range = THREE.MathUtils.clamp(1.4 - dist / (45 * sight), 0.12 * sight, 1.4);
             const stance = p.crouching ? 0.6 : 1;
             const motion = 0.6 + Math.min(1, p.moveFactor) * 0.6;
             const alert = this.combat ? 2.2 : 1;
@@ -321,13 +352,13 @@ export class Enemy {
       if (frac === 0) this.awareness = Math.max(this.combat ? 0.5 : 0, this.awareness - 0.12 * 0.15);
       // Half-aware of something moving in view: remember roughly where
       if (frac > 0 && !sees && this.awareness > 0.35) {
-        this.known.copy(p.position).setY(0);
+        this.known.copy(p.position);
         this.sinceKnown = Math.min(this.sinceKnown, 2);
       }
     }
     if (this.sees) {
       this.combat = true;
-      this.known.copy(p.position).setY(0);
+      this.known.copy(p.position);
       this.knownVel.copy(p.velocity).setY(0);
       this.sinceKnown = 0;
       this.sinceSeen = 0;
@@ -382,7 +413,8 @@ export class Enemy {
   }
 
   private arrived(tol = 0.6): boolean {
-    return !this.moveTarget || Math.hypot(this.moveTarget.x - this.position.x, this.moveTarget.z - this.position.z) < tol;
+    return !this.moveTarget || (Math.hypot(this.moveTarget.x - this.position.x, this.moveTarget.z - this.position.z) < tol
+      && Math.abs(this.moveTarget.y - this.position.y) < 1.6);
   }
 
   private takeCover(ctx: EnemyCtx, threat: THREE.Vector3, opts: { min: number; max: number; travel: number; flank?: boolean; speed?: number }): boolean {
@@ -402,19 +434,20 @@ export class Enemy {
     // Prefer the route that stays out of the player's sight the most
     let best: CoverPoint | null = null;
     let bestCost = Infinity;
-    const eye = threat.clone().setY(1.5);
+    const eye = threat.clone().setY(threat.y + 1.5);
     for (const [i, c] of cands.entries()) {
       const path = ctx.nav.findPath(this.position, c.pos);
       if (!path.length) continue;
       let exposed = 0;
       let len = 0;
-      let prev = this.position.clone().setY(0);
+      let prev = this.position.clone();
       for (const wp of path) {
         const seg = prev.distanceTo(wp);
         len += seg;
         const steps = Math.max(1, Math.floor(seg / 2.5));
         for (let s = 1; s <= steps; s++) {
-          const q = prev.clone().lerp(wp, s / steps).setY(1.4);
+          const q = prev.clone().lerp(wp, s / steps);
+          q.y += 1.4;
           if (lineOfSight(q, eye, ctx.colliders)) exposed += seg / steps;
         }
         prev = wp;
@@ -437,7 +470,8 @@ export class Enemy {
   }
 
   private atCover(): boolean {
-    return !!this.cover && Math.hypot(this.cover.pos.x - this.position.x, this.cover.pos.z - this.position.z) < 0.9;
+    return !!this.cover && Math.hypot(this.cover.pos.x - this.position.x, this.cover.pos.z - this.position.z) < 0.9
+      && Math.abs(this.cover.pos.y - this.position.y) < 1.6;
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -452,11 +486,23 @@ export class Enemy {
     const atCover = this.atCover();
     const protectedNow = !!threat && atCover && !!this.cover && ctx.cover.protects(this.cover, threat);
 
+    if (this.friendly) {
+      // Escort: keep close behind the player, wait when they stop
+      this.setState('patrol');
+      if (this.follow) {
+        const d = this.position.distanceTo(p.position);
+        if (d > 3.2) {
+          const dest = ctx.nav.closest(p.position) ?? p.position;
+          this.go(dest, d > 9 ? 6.4 : 4.2);
+        } else this.stop();
+      } else this.stop();
+      return;
+    }
     if (this.stats.passive) {
       // Practice targets: jog between random cover points
       if (this.arrived() || this.stateT > 12) {
         const pts = ctx.cover.points;
-        this.go(pts[Math.floor(Math.random() * pts.length)].pos, this.stats.speed);
+        if (pts.length) this.go(pts[Math.floor(Math.random() * pts.length)].pos, this.stats.speed);
         this.setState('patrol');
       }
       return;
@@ -732,18 +778,30 @@ export class Enemy {
       return;
     }
     this.setState('patrol');
+    if (this.home) {
+      // On post: stand a while, then wander a few steps around it
+      if (this.arrived() && this.moveTarget) this.stop();
+      if (this.stateT > this.patrolWait) {
+        const q = this.leash > 0.5 ? ctx.nav.randomPointAround(this.home, this.leash) : null;
+        if (q && Math.abs(q.y - this.home.y) < 1.2) this.go(q, this.stats.speed * 0.3);
+        this.patrolWait = 4 + Math.random() * 7;
+        this.stateT = 0;
+      }
+      return;
+    }
     if (this.arrived() || this.stateT > 15) {
       const pts = ctx.cover.points;
-      this.go(pts[Math.floor(Math.random() * pts.length)].pos, this.stats.speed * 0.4);
+      if (pts.length) this.go(pts[Math.floor(Math.random() * pts.length)].pos, this.stats.speed * 0.4);
       this.stateT = 0;
     }
   }
+  private patrolWait = Math.random() * 5;
 
   private canSuppress(ctx: EnemyCtx, threat: THREE.Vector3): boolean {
     // Standing up / stepping out gives a line to the area the player is hiding in
     const from = (this.cover && ctx.cover.peekPosition(this.cover, threat)) ?? this.position;
-    return lineOfSight(from.clone().setY(1.6), threat.clone().setY(1.6), ctx.colliders)
-      || lineOfSight(from.clone().setY(1.6), threat.clone().setY(2.2), ctx.colliders);
+    return lineOfSight(from.clone().setY(from.y + 1.6), threat.clone().setY(threat.y + 1.6), ctx.colliders)
+      || lineOfSight(from.clone().setY(from.y + 1.6), threat.clone().setY(threat.y + 2.2), ctx.colliders);
   }
 
   /** Is the player looking down their sights at this bot? */
@@ -835,7 +893,7 @@ export class Enemy {
     const engaging = !!threat && (this.sees || this.sinceSeen < 1.5 || s === 'suppress') && this.reloadT <= 0;
     this.rig.aimTarget = engaging && s !== 'retreat' && s !== 'evade' ? 1 : threat && this.combat && s !== 'patrol' ? 0.3 : 0;
     if (threat) {
-      this.rig.aimPoint.copy(this.sees ? p.eye.setY(p.eye.y - 0.35) : threat.clone().setY(1.3));
+      this.rig.aimPoint.copy(this.sees ? p.eye.setY(p.eye.y - 0.35) : threat.clone().setY(threat.y + 1.3));
       this.rig.lookWeight = 1;
     } else this.rig.lookWeight = 0;
 
@@ -917,7 +975,7 @@ export class Enemy {
     const p = ctx.player;
     const from = this.rig.muzzle.getWorldPosition(new THREE.Vector3());
     const aimAt = suppressAt
-      ? suppressAt.clone().setY(1.2 + Math.random() * 0.8)
+      ? suppressAt.clone().setY(suppressAt.y + 1.2 + Math.random() * 0.8)
       : p.position.clone().setY(p.position.y + p.height * 0.62).addScaledVector(p.velocity, 0.12 * this.stats.accuracy);
     const dist = from.distanceTo(aimAt);
     // Don't shoot through a friend
@@ -1009,6 +1067,9 @@ export class Enemy {
     this.rig.dispose();
   }
 }
+
+const _feet = new THREE.Vector3();
+const _down = new THREE.Vector3(0, -1, 0);
 
 function gauss(): number {
   // Box-Muller, clamped so outliers don't fly off at 90 degrees
@@ -1130,6 +1191,19 @@ export class GrenadeSystem {
 /** Soldier models and a brightness gain for each (some are textured much darker than the world is lit). */
 const SOLDIER_MODELS: [name: string, gain: number][] = [['us_soldier', 1], ['soldier_ksk', 4], ['soldier_bw', 4]];
 
+export interface SpawnOpts {
+  role?: Role;
+  /** Indices into the soldier models (see SOLDIER_MODELS). */
+  models?: number[];
+  home?: THREE.Vector3;
+  leash?: number;
+  group?: string;
+  friendly?: boolean;
+  label?: string;
+  scale?: number;
+  facing?: number;
+}
+
 export class EnemyManager {
   readonly enemies: Enemy[] = [];
   readonly squad = new Squad();
@@ -1193,9 +1267,9 @@ export class EnemyManager {
   }
 
   /** `hunt`: the bot arrives knowing roughly where the player is (wave attackers). */
-  spawn(at: THREE.Vector3, stats: EnemyStats, hunt?: THREE.Vector3): Enemy {
+  spawn(at: THREE.Vector3, stats: EnemyStats, hunt?: THREE.Vector3, opts: SpawnOpts = {}): Enemy {
     const n = this.spawnCount++;
-    const role: Role = stats.passive ? 'rifleman' : n % 7 === 4 ? 'marksman' : n % 4 === 1 ? 'flanker' : n % 6 === 3 ? 'rusher' : 'rifleman';
+    const role: Role = opts.role ?? (stats.passive ? 'rifleman' : n % 7 === 4 ? 'marksman' : n % 4 === 1 ? 'flanker' : n % 6 === 3 ? 'rusher' : 'rifleman');
     const isSniper = role === 'marksman';
     const isPistol = role === 'flanker';
     const def = isSniper ? WEAPONS[2] : isPistol ? WEAPONS[1] : WEAPONS[0];
@@ -1203,16 +1277,23 @@ export class EnemyManager {
     const gunClone = gunProto.clone(true);
     const muzzleZ = -def.muzzle[2];
     // Spread the models over the spawn order (not by role: the same man shouldn't always be the sniper)
-    const proto = this.protos[(n * 5 + (n >> 2)) % this.protos.length];
+    const models = opts.models?.filter((i) => i < this.protos.length);
+    const proto = models?.length ? this.protos[models[n % models.length]] : this.protos[(n * 5 + (n >> 2)) % this.protos.length];
     const e = new Enemy(proto, gunClone, muzzleZ, at, stats, this.scene, role, this.phys, def);
     // People differ in height
-    e.rig.root.scale.setScalar(0.96 + ((n * 37) % 9) * 0.01);
+    e.rig.root.scale.setScalar((0.96 + ((n * 37) % 9) * 0.01) * (opts.scale ?? 1));
+    e.home = opts.home ?? null;
+    if (opts.leash !== undefined) e.leash = opts.leash;
+    e.group = opts.group ?? '';
+    e.friendly = !!opts.friendly;
+    e.label = opts.label ?? '';
+    if (opts.facing !== undefined) e.setFacing(opts.facing);
     e.rig.onMagDrop = (mag, vel) => this.onMagDrop?.(mag, vel);
     e.rig.onDropGun = (pivot, vel, size, center) => this.onDropGun?.(e, pivot, vel, def, def.magSize, size, center);
     if (this.nav) {
       e.agent = this.nav.addAgent(at, stats.speed);
       const p = e.agent.position();
-      e.position.set(p.x, 0, p.z);
+      e.position.set(p.x, Math.abs(p.y) < 0.3 ? 0 : p.y, p.z);
     }
     if (hunt && !stats.passive) e.hunt(hunt);
     this.scene.add(e.rig.root);
@@ -1221,15 +1302,18 @@ export class EnemyManager {
   }
 
   get alive(): number {
-    return this.enemies.reduce((n, e) => n + (e.dead ? 0 : 1), 0);
+    return this.enemies.reduce((n, e) => n + (e.dead || e.friendly ? 0 : 1), 0);
   }
+
+  /** Weather: scales how far the player's noise carries. */
+  hearingScale = 1;
 
   /** The player fired: bots within earshot learn roughly where; near misses suppress. */
   playerFired(from: THREE.Vector3, dir: THREE.Vector3, loudness: number): void {
     for (const e of this.enemies) {
-      if (e.dead) continue;
+      if (e.dead || e.friendly) continue;
       const d = e.position.distanceTo(from);
-      const range = 60 * loudness;
+      const range = 60 * loudness * this.hearingScale;
       if (d < range) e.hear(from, THREE.MathUtils.clamp(1 - d / range, 0.2, 0.95));
       const toE = e.chest.sub(from);
       const along = toE.dot(dir);
@@ -1243,8 +1327,9 @@ export class EnemyManager {
 
   /** Footsteps / reload noise from the player. */
   playerNoise(at: THREE.Vector3, radius: number, kind: 'step' | 'reload'): void {
+    radius *= this.hearingScale;
     for (const e of this.enemies) {
-      if (e.dead) continue;
+      if (e.dead || e.friendly) continue;
       const d = e.position.distanceTo(at);
       if (d < radius) {
         e.hear(at, 0.55 * (1 - d / radius) + 0.2);
@@ -1292,6 +1377,7 @@ export class EnemyManager {
   raycast(o: THREE.Vector3, d: THREE.Vector3, maxDist: number): EnemyHit | null {
     let best: EnemyHit | null = null;
     for (const e of this.enemies) {
+      if (e.friendly) continue;
       const r = e.raycast(o, d);
       if (!r || r.distance > maxDist) continue;
       if (!best || r.distance < best.distance) {

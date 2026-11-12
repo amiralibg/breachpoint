@@ -32,6 +32,7 @@ export class CommandBuilder {
     if (input.aim) buttons |= Btn.Aim;
     if (input.down('ShiftLeft')) buttons |= Btn.Sprint;
     if (input.down('ControlLeft') || input.down('KeyC')) buttons |= Btn.Crouch;
+    if (input.down('KeyE')) buttons |= Btn.Interact;
     let pressed = this.latched;
     if (this.wheel > 0) pressed |= Btn.NextWeapon;
     if (this.wheel < 0) pressed |= Btn.PrevWeapon;

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { Btn, type PlayerCommand } from '../net/protocol';
+import { boxesNear } from '../world/physics';
 
 const STAND_H = 1.8;
 const CROUCH_H = 1.25;
@@ -50,6 +51,9 @@ export class Player {
   private landDip = 0;
   private landVel = 0;
   private deathRoll = 0;
+  /** Camera height still to catch up after a stair step (keeps the view smooth on stairs). */
+  private stepOffset = 0;
+  private near: THREE.Box3[] = [];
   /** Extra view rotation that isn't part of the aim (scope sway, camera shake). */
   readonly viewOffset = new THREE.Euler();
 
@@ -68,6 +72,8 @@ export class Player {
     this.height = this.prevHeight = STAND_H;
     this.crouching = false;
     this.deathRoll = 0;
+    this.stepOffset = 0;
+    this.onGround = false;
   }
 
   /** Eye position at the latest tick (what the simulation uses). */
@@ -99,7 +105,9 @@ export class Player {
     return false;
   }
 
-  simulate(cmd: PlayerCommand, dt: number, colliders: THREE.Box3[], aiming: boolean): void {
+  /** `speedScale` slows the player down (wading through water). */
+  simulate(cmd: PlayerCommand, dt: number, allColliders: THREE.Box3[], aiming: boolean, speedScale = 1): void {
+    const colliders = boxesNear(allColliders, this.position.x - 2.5, this.position.z - 2.5, this.position.x + 2.5, this.position.z + 2.5, this.near);
     this.prevPosition.copy(this.position);
     this.prevHeight = this.height;
     this.yaw = cmd.yaw;
@@ -130,6 +138,7 @@ export class Player {
     this.sprinting = held(Btn.Sprint) && cmd.moveZ > 0 && !this.crouching && !aiming;
     let maxSpeed = this.crouching ? CROUCH_SPEED : this.sprinting ? SPRINT : WALK;
     if (aiming) maxSpeed *= 0.6;
+    maxSpeed *= speedScale;
 
     // --- Friction & acceleration (Quake/Source style)
     const hv = new THREE.Vector3(this.velocity.x, 0, this.velocity.z);
@@ -150,9 +159,11 @@ export class Player {
     this.velocity.z = hv.z;
 
     // --- Jump & gravity
+    let jumped = false;
     if (this.onGround && (cmd.pressed & Btn.Jump)) {
-      this.velocity.y = JUMP_V;
+      this.velocity.y = JUMP_V * (speedScale < 1 ? 0.75 : 1);
       this.onGround = false;
+      jumped = true;
     }
     this.velocity.y -= GRAVITY * dt;
     const wasGround = this.onGround;
@@ -163,13 +174,24 @@ export class Player {
     this.moveAxis('z', this.velocity.z * dt, colliders);
     this.onGround = false;
     this.moveAxis('y', this.velocity.y * dt, colliders);
+    // Walking off a stair tread: follow the stairs down instead of hopping from step to step
+    if (wasGround && !this.onGround && !jumped && this.position.y > 0) {
+      const y = this.position.y;
+      const vy = this.velocity.y;
+      this.moveAxis('y', -(STEP - 0.05), colliders);
+      if (this.onGround || this.position.y <= 0) this.stepOffset += y - Math.max(0, this.position.y);
+      else {
+        this.position.y = y;
+        this.velocity.y = vy;
+      }
+    }
     if (this.position.y <= 0) {
       this.position.y = 0;
       this.velocity.y = 0;
       this.onGround = true;
     }
     if (this.onGround && !wasGround) {
-      this.landed = THREE.MathUtils.clamp((this.fallSpeed - 2) / 8, 0, 1);
+      this.landed = THREE.MathUtils.clamp((this.fallSpeed - 3.2) / 8, 0, 1);
       if (this.landed > 0) {
         this.landVel -= this.landed * 1.6;
         this.onFootstep?.();
@@ -197,7 +219,8 @@ export class Player {
     // Landing: a damped spring dips the view
     this.landVel += (-this.landDip * 220 - this.landVel * 18) * dt;
     this.landDip += this.landVel * dt;
-    const h = THREE.MathUtils.lerp(this.prevHeight, this.height, alpha);
+    this.stepOffset = THREE.MathUtils.clamp(THREE.MathUtils.damp(this.stepOffset, 0, 16, dt), -0.7, 0.7);
+    const h = THREE.MathUtils.lerp(this.prevHeight, this.height, alpha) + this.stepOffset;
     const p = this.prevPosition.clone().lerp(this.position, alpha);
     this.camera.position.set(p.x, p.y + h - EYE_OFFSET + bob + this.landDip * 0.08, p.z);
     this.camera.rotation.set(
@@ -216,7 +239,7 @@ export class Player {
 
   private canStand(colliders: THREE.Box3[]): boolean {
     const b = this.makeBox(this.position, STAND_H);
-    return !colliders.some((c) => c.intersectsBox(b));
+    return !colliders.some((c) => c.max.y > this.position.y + 1e-4 && c.intersectsBox(b));
   }
 
   private moveAxis(axis: 'x' | 'y' | 'z', delta: number, colliders: THREE.Box3[]): void {
@@ -226,6 +249,8 @@ export class Player {
     const b = this.makeBox(p, this.height);
     for (const c of colliders) {
       if (!c.intersectsBox(b)) continue;
+      // Box3 counts touching as intersecting: the floor under the feet is not a wall
+      if (axis !== 'y' && (c.max.y <= p.y + 1e-4 || c.min.y >= p.y + this.height - 1e-4)) continue;
       if (axis === 'y') {
         if (delta < 0) {
           p.y = c.max.y;
@@ -239,7 +264,9 @@ export class Player {
         const rise = c.max.y - p.y;
         if (rise > 0 && rise <= STEP && this.onGroundish()) {
           const test = this.makeBox(new THREE.Vector3(p.x, c.max.y + 0.001, p.z), this.height);
-          if (!colliders.some((o) => o !== c && o.intersectsBox(test))) {
+          const ty = c.max.y + 0.001;
+          if (!colliders.some((o) => o !== c && o.max.y > ty + 1e-4 && o.intersectsBox(test))) {
+            this.stepOffset -= c.max.y + 0.001 - p.y;
             p.y = c.max.y + 0.001;
             continue;
           }

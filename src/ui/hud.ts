@@ -31,6 +31,12 @@ export class Hud {
   private toastsEl = $('hud-toasts');
   private suppressEl = $('suppress-vignette');
   private grenadeEl = $('grenade-warn');
+  private objectivesEl = $('hud-objectives');
+  private markersEl = $('hud-markers');
+  private subtitleEl = $('hud-subtitle');
+  private progressEl = $('hud-progress');
+  private clockEl = $('hud-clock');
+  private objectivesKey = '';
   private suppressT = 0;
   private scoped = false;
   private hitT = 0;
@@ -181,6 +187,91 @@ export class Hud {
     this.feed.innerHTML = '';
     this.bannerT = 0;
     this.damageT = 0;
+  }
+
+  /** Story missions hide the score and show objectives instead. */
+  setStory(on: boolean): void {
+    this.root.classList.toggle('story', on);
+    if (!on) {
+      this.objectives([]);
+      this.markers([], null, null);
+      this.subtitle(null);
+      this.progress(null);
+      this.clock(null, false);
+    }
+  }
+
+  objectives(list: { text: string; done: boolean; optional: boolean }[]): void {
+    const key = list.map((o) => `${o.done ? 1 : 0}${o.optional ? 1 : 0}${o.text}`).join('|');
+    if (key === this.objectivesKey) return;
+    this.objectivesKey = key;
+    this.objectivesEl.replaceChildren(...list.map((o) => {
+      const el = document.createElement('div');
+      el.className = `obj${o.done ? ' done' : ''}${o.optional ? ' optional' : ''}`;
+      el.textContent = o.text;
+      return el;
+    }));
+  }
+
+  /** Objective markers: a diamond with the distance, pinned to the screen edge when out of view. */
+  markers(list: { pos: import('three').Vector3; label: string }[], camera: import('three').Camera | null, playerPos: import('three').Vector3 | null): void {
+    while (this.markersEl.children.length < list.length) {
+      const d = document.createElement('div');
+      d.className = 'marker';
+      d.innerHTML = '<i></i><span></span>';
+      this.markersEl.appendChild(d);
+    }
+    while (this.markersEl.children.length > list.length) this.markersEl.lastChild!.remove();
+    if (!camera || !playerPos) return;
+    const w = window.innerWidth, h = window.innerHeight;
+    list.forEach((m, i) => {
+      const v = m.pos.clone().project(camera);
+      let x = v.x, y = v.y;
+      const behind = v.z > 1;
+      if (behind) {
+        x = -x;
+        y = -y;
+      }
+      const k = Math.max(Math.abs(x) / 0.92, Math.abs(y) / 0.86);
+      const off = behind || k > 1;
+      if (off) {
+        const s = k > 1e-4 ? 1 / k : 1;
+        x *= behind && k < 1 ? 1 / Math.max(k, 0.2) * 0.9 : s;
+        y *= behind && k < 1 ? 1 / Math.max(k, 0.2) * 0.9 : s;
+        x = Math.max(-0.92, Math.min(0.92, x));
+        y = Math.max(-0.86, Math.min(0.86, y));
+      }
+      const el = this.markersEl.children[i] as HTMLElement;
+      el.classList.toggle('off', off);
+      el.style.left = `${((x + 1) / 2) * w}px`;
+      el.style.top = `${((1 - y) / 2) * h}px`;
+      el.lastElementChild!.textContent = `${Math.round(playerPos.distanceTo(m.pos))} m`;
+    });
+  }
+
+  /** Radio line at the bottom of the screen. */
+  subtitle(who: string | null, text = ''): void {
+    if (!who) {
+      this.subtitleEl.classList.remove('visible');
+      return;
+    }
+    this.subtitleEl.dataset.who = who.toLowerCase();
+    this.subtitleEl.querySelector('b')!.textContent = who;
+    this.subtitleEl.querySelector('span')!.textContent = text;
+    this.subtitleEl.classList.add('visible');
+  }
+
+  progress(bar: { label: string; frac: number } | null): void {
+    this.progressEl.classList.toggle('hidden', !bar);
+    if (!bar) return;
+    this.progressEl.querySelector('span')!.textContent = bar.label.toUpperCase();
+    (this.progressEl.querySelector('i') as HTMLElement).style.width = `${Math.min(100, bar.frac * 100)}%`;
+  }
+
+  clock(text: string | null, urgent: boolean): void {
+    this.clockEl.classList.toggle('hidden', !text);
+    if (text) this.clockEl.textContent = text;
+    this.clockEl.classList.toggle('urgent', urgent);
   }
 
   setInteractPrompt(prompt: { key: string; action: string; detail: string } | null): void {

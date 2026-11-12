@@ -1,7 +1,7 @@
 import type { EnemyStats } from '../enemies/enemies';
 import type { Game } from './game';
 
-export type ModeId = 'waves' | 'practice';
+export type ModeId = 'waves' | 'practice' | 'story';
 
 export interface GameMode {
   id: ModeId;
@@ -16,6 +16,11 @@ export interface GameMode {
   score: number;
   kills: number;
   wave: number;
+  /** Story missions: what E does right now, and the mission HUD. */
+  interactPrompt?(): { key: string; action: string; detail: string } | null;
+  render?(game: Game): void;
+  /** Multiplies how well bots see (mission lighting changes). */
+  sightScale?: number;
 }
 
 /** Wave Survival: endless, escalating waves of armed enemies. */

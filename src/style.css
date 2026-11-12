@@ -227,3 +227,72 @@ kbd { font-family: var(--font); background: #22252a; border: 1px solid #3a3d42; 
 #ai-debug > div { position: absolute; transform: translate(-50%, -100%); background: rgba(0,0,0,.6); color: #cfe; padding: 2px 5px;
   border-radius: 3px; white-space: nowrap; text-align: center; }
 #ai-debug > .sq { left: 12px !important; top: auto !important; bottom: 12px; transform: none; }
+
+/* ---------- Story mode ---------- */
+.menu-panel.wide { width: min(680px, 92vw); max-height: 92vh; overflow-y: auto; }
+.lede { color: var(--muted); font-size: 15px; line-height: 1.5; margin: -8px 0 6px; }
+.menu-list.row { flex-direction: row; }
+.menu-list.row button { flex: 1; }
+.menu-list button:disabled { opacity: .55; cursor: default; transform: none; }
+.mission-list button { flex-direction: row; align-items: center; gap: 16px; }
+.mission-list .num { font-size: 30px; color: var(--muted); width: 34px; flex: none; }
+.mission-list .body { display: flex; flex-direction: column; gap: 3px; flex: 1; }
+.mission-list .tag { font-size: 11px; letter-spacing: .18em; color: var(--muted); text-transform: uppercase; flex: none; }
+.mission-list button.done .tag { color: #8fd17a; }
+.mission-list button.next .num { color: var(--accent); }
+.brief-clock { color: var(--accent); letter-spacing: .26em; font-size: 12px; text-transform: uppercase; margin-bottom: 6px; }
+#briefing h1, #debrief h1 { margin-bottom: 4px; }
+.brief-sub { color: var(--muted); letter-spacing: .2em; text-transform: uppercase; font-size: 12px; margin-bottom: 16px; }
+.brief-body { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent); padding: 14px 18px; }
+.brief-body p { margin: 0 0 10px; line-height: 1.55; font-size: 15px; }
+.brief-body p:last-child { margin-bottom: 0; }
+.brief-body p.radio { color: #c9d6e2; }
+.brief-body p.radio b { color: var(--accent); letter-spacing: .12em; margin-right: 8px; font-size: 12px; }
+.menu-panel h3 { font-size: 12px; letter-spacing: .22em; color: var(--muted); text-transform: uppercase; margin: 18px 0 8px; font-weight: 400; }
+.brief-objectives { margin: 0; padding: 0; list-style: none; }
+.brief-objectives li { padding: 5px 0 5px 22px; position: relative; font-size: 15px; }
+.brief-objectives li::before { content: ''; position: absolute; left: 4px; top: 11px; width: 7px; height: 7px; background: var(--accent); transform: rotate(45deg); }
+.brief-loadout { margin-top: 14px; color: var(--muted); font-size: 13px; letter-spacing: .1em; text-transform: uppercase; }
+#debrief .stats { margin-top: 14px; }
+
+#hud.story .hud-topright div:first-child { display: none; }
+#hud-objectives { position: absolute; top: 74px; left: 22px; display: flex; flex-direction: column; gap: 5px; max-width: 360px; }
+#hud-objectives .obj { background: rgba(0,0,0,.42); border-left: 2px solid var(--accent); padding: 6px 12px 6px 28px; font-size: 15px; letter-spacing: .04em; position: relative; }
+#hud-objectives .obj::before { content: ''; position: absolute; left: 10px; top: 11px; width: 8px; height: 8px; border: 1.5px solid var(--accent); transform: rotate(45deg); }
+#hud-objectives .obj.done { color: var(--muted); border-left-color: #6fae5c; text-decoration: line-through; }
+#hud-objectives .obj.done::before { background: #6fae5c; border-color: #6fae5c; }
+#hud-objectives .obj.optional { border-left-color: var(--muted); }
+#hud-objectives .obj.optional::before { border-color: var(--muted); }
+#hud-markers .marker { position: absolute; transform: translate(-50%, -50%); display: flex; flex-direction: column; align-items: center; gap: 5px; }
+#hud-markers .marker i { width: 12px; height: 12px; border: 2px solid var(--accent); transform: rotate(45deg); background: rgba(232,163,60,.25); box-shadow: 0 0 0 1px rgba(0,0,0,.5); }
+#hud-markers .marker span { font-size: 12px; letter-spacing: .1em; color: var(--accent); }
+#hud-markers .marker.off i { background: var(--accent); }
+#hud-clock { position: absolute; top: 78px; left: 50%; transform: translateX(-50%); font-size: 20px; letter-spacing: .18em; background: rgba(0,0,0,.45); padding: 3px 14px; }
+#hud-clock.urgent { color: var(--red); }
+#hud-progress { position: absolute; left: 50%; top: 62%; transform: translateX(-50%); width: 280px; text-align: center; }
+#hud-progress span { font-size: 12px; letter-spacing: .22em; color: var(--accent); }
+#hud-progress div { height: 4px; background: rgba(255,255,255,.16); margin-top: 6px; }
+#hud-progress i { display: block; height: 100%; width: 0; background: var(--accent); }
+#hud-subtitle { position: absolute; left: 50%; bottom: 150px; transform: translateX(-50%); max-width: min(760px, 80vw); text-align: center;
+  background: rgba(0,0,0,.55); padding: 8px 16px; font-size: 18px; line-height: 1.35; opacity: 0; transition: opacity .2s; }
+#hud-subtitle.visible { opacity: 1; }
+#hud-subtitle b { font-size: 12px; letter-spacing: .2em; color: var(--accent); margin-right: 10px; text-transform: uppercase; }
+#hud-subtitle[data-who="kestrel"] b { color: #b9ff7a; }
+#hud-subtitle[data-who="mirela"] b, #hud-subtitle[data-who="dace"] b, #hud-subtitle[data-who="hana"] b, #hud-subtitle[data-who="pell"] b { color: #7cc4ff; }
+#hud-subtitle[data-who="cordon"] b, #hud-subtitle[data-who="vahl"] b { color: var(--red); }
+
+/* Story progression */
+.campaign-progress { display: flex; align-items: center; gap: 14px; margin: 4px 0 14px; color: var(--muted); font-size: 12px; letter-spacing: .2em; text-transform: uppercase; }
+.campaign-progress div { flex: 1; height: 2px; background: rgba(255, 255, 255, .12); }
+.campaign-progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s ease; }
+.mission-list button.locked { opacity: .4; }
+.mission-list button.locked .num { color: rgba(255, 255, 255, .25); }
+.mission-list button.next .tag { color: var(--accent); }
+.debrief-next { display: flex; flex-direction: column; gap: 3px; margin: 18px 0 6px; padding: 12px 16px; border-left: 2px solid var(--accent); background: rgba(255, 255, 255, .04); }
+.debrief-next span { color: var(--accent); font-size: 11px; letter-spacing: .26em; text-transform: uppercase; }
+.debrief-next b { font-size: 18px; letter-spacing: .08em; text-transform: uppercase; }
+.debrief-next small { color: var(--muted); font-size: 13px; }
+.brief-resume { display: flex; flex-direction: column; gap: 3px; margin: 14px 0 4px; padding: 10px 14px; border-left: 2px solid var(--accent); background: rgba(255, 255, 255, .04); }
+.brief-resume span { color: var(--accent); font-size: 11px; letter-spacing: .26em; text-transform: uppercase; }
+.brief-resume b { font-size: 15px; letter-spacing: .06em; }
+.brief-resume small { color: var(--muted); font-size: 12px; }

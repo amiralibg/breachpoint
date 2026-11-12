@@ -22,7 +22,13 @@
         <div class="brand">BREACH<span>POINT</span></div>
         <p class="tagline">Tactical close-quarters combat</p>
         <nav class="menu-list">
-          <button data-action="play-waves" class="primary">
+          <button data-action="story" class="primary" id="story-btn">
+            <b id="story-title">Story: Low Water</b><small id="story-sub">Six chapters in a flood city, 40 hours before the surge</small>
+          </button>
+          <button data-action="campaign" id="chapters-btn" class="hidden">
+            <b>Chapters</b><small>Replay a finished chapter or start a new story</small>
+          </button>
+          <button data-action="play-waves">
             <b>Wave Survival</b><small>Hold the compound against endless escalating waves</small>
           </button>
           <button data-action="play-practice">
@@ -31,7 +37,58 @@
           <button data-action="settings"><b>Settings</b><small>Graphics quality, mouse, audio</small></button>
           <button data-action="controls"><b>Controls</b><small>Keyboard and mouse bindings</small></button>
         </nav>
-        <p class="credits">Assets: Poly Haven (CC0) · "Classic M4" by jeandiz and "American Soldier Rigged" by matheofrelin3 (Sketchfab, CC BY 4.0) · animations from three.js examples</p>
+        <p class="credits">Assets: Poly Haven (CC0) · "Classic M4" by jeandiz, "Pistol 9mm - semi auto" by Hitansh_3DArtist, "PGM Ultima Ratio" by flip.3d and "American Soldier Rigged" by matheofrelin3 (Sketchfab, CC BY 4.0) · animations from three.js examples</p>
+      </div>
+    </section>
+
+    <!-- Campaign -->
+    <section id="campaign" class="screen hidden dim">
+      <div class="menu-panel wide">
+        <h1>LOW WATER</h1>
+        <p class="lede">Port Veyle, 2034. A storm surge peaks in 36 hours. You are Sergeant Ilse Varga, callsign Kestrel, sent to take the pumps back.</p>
+        <div class="campaign-progress"><span id="campaign-progress"></span><div><i id="campaign-bar"></i></div></div>
+        <nav class="menu-list mission-list" id="mission-list"></nav>
+        <nav class="menu-list row">
+          <button data-action="back"><b>Back</b></button>
+          <button data-action="story-reset" id="story-reset" class="hidden"><b>Start a new story</b></button>
+        </nav>
+      </div>
+    </section>
+
+    <!-- Briefing -->
+    <section id="briefing" class="screen hidden dim">
+      <div class="menu-panel wide">
+        <div class="brief-clock" id="brief-clock"></div>
+        <h1 id="brief-title"></h1>
+        <div class="brief-sub" id="brief-sub"></div>
+        <div class="brief-body" id="brief-body"></div>
+        <div class="brief-resume hidden" id="brief-resume"></div>
+        <h3>Objectives</h3>
+        <ul class="brief-objectives" id="brief-objectives"></ul>
+        <div class="brief-loadout" id="brief-loadout"></div>
+        <nav class="menu-list row">
+          <button data-action="deploy" class="primary" id="deploy-btn" disabled><b>Preparing…</b></button>
+          <button data-action="deploy-fresh" id="deploy-fresh" class="hidden" disabled><b>Restart chapter</b></button>
+          <button data-action="campaign"><b>Back</b></button>
+        </nav>
+      </div>
+    </section>
+
+    <!-- Mission complete -->
+    <section id="debrief" class="screen hidden dim">
+      <div class="menu-panel wide">
+        <div class="brief-clock" id="debrief-kicker">CHAPTER COMPLETE</div>
+        <h1 id="debrief-title"></h1>
+        <div class="brief-body" id="debrief-body"></div>
+        <div class="stats">
+          <div><span>Time</span><b id="debrief-time">0:00</b></div>
+          <div><span>Hostiles down</span><b id="debrief-kills">0</b></div>
+        </div>
+        <div class="debrief-next" id="debrief-next"></div>
+        <nav class="menu-list row">
+          <button data-action="next-mission" class="primary" id="next-btn"><b>Continue</b></button>
+          <button data-action="quit"><b>Main menu</b></button>
+        </nav>
       </div>
     </section>
 
@@ -41,6 +98,7 @@
         <h1>PAUSED</h1>
         <nav class="menu-list">
           <button data-action="resume" class="primary"><b>Resume</b></button>
+          <button data-action="restart-checkpoint" id="pause-checkpoint" class="hidden"><b>Restart from checkpoint</b></button>
           <button data-action="settings"><b>Settings</b></button>
           <button data-action="controls"><b>Controls</b></button>
           <button data-action="quit"><b>Quit to menu</b></button>
@@ -51,15 +109,16 @@
     <!-- Game over -->
     <section id="gameover" class="screen hidden dim">
       <div class="menu-panel narrow">
-        <h1 class="red">K.I.A.</h1>
-        <div class="stats">
+        <h1 class="red" id="go-title">K.I.A.</h1>
+        <p class="lede hidden" id="go-reason"></p>
+        <div class="stats" id="go-stats">
           <div><span>Wave reached</span><b id="go-wave">0</b></div>
           <div><span>Kills</span><b id="go-kills">0</b></div>
           <div><span>Score</span><b id="go-score">0</b></div>
           <div><span>Best score</span><b id="go-best">0</b></div>
         </div>
         <nav class="menu-list">
-          <button data-action="play-again" class="primary"><b>Deploy again</b></button>
+          <button data-action="play-again" class="primary"><b id="go-again">Deploy again</b></button>
           <button data-action="quit"><b>Main menu</b></button>
         </nav>
       </div>
@@ -110,7 +169,7 @@
           <tr><td><kbd>Mouse</kbd></td><td>Look</td></tr>
           <tr><td><kbd>LMB</kbd></td><td>Fire</td></tr>
           <tr><td><kbd>RMB</kbd></td><td>Aim down sights (hold)</td></tr>
-          <tr><td><kbd>E</kbd></td><td>Loot weapon / scavenge ammo</td></tr>
+          <tr><td><kbd>E</kbd></td><td>Use objective / loot weapon / scavenge ammo</td></tr>
           <tr><td><kbd>R</kbd></td><td>Reload (tactical keeps the mag, empty racks the bolt)</td></tr>
           <tr><td><kbd>F</kbd></td><td>Inspect weapon</td></tr>
           <tr><td><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>Q</kbd> <kbd>Wheel</kbd></td><td>M4 / Pistol / Sniper</td></tr>
@@ -137,6 +196,11 @@
         </div>
       </div>
       <div id="hud-toasts"></div>
+      <div id="hud-objectives"></div>
+      <div id="hud-markers"></div>
+      <div id="hud-clock" class="hidden"></div>
+      <div id="hud-progress" class="hidden"><span></span><div><i></i></div></div>
+      <div id="hud-subtitle"><b></b><span></span></div>
       <div id="scope" class="hidden">
         <div class="scope-glass"></div>
         <svg class="reticle" viewBox="-500 -500 1000 1000" preserveAspectRatio="xMidYMid meet">

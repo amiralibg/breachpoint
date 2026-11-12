@@ -14,5 +14,7 @@ public/assets/characters/*
 !public/assets/models/
 public/assets/models/*
 !public/assets/models/m4/
+!public/assets/models/g19/
+!public/assets/models/ultima_ratio/
 # Synthesized by scripts/make_sounds.py (small, kept in the repo)
 !public/assets/audio/

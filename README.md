@@ -1,6 +1,6 @@
 # BREACHPOINT
 
-Browser FPS (Three.js + TypeScript + Vite) with a **Wave Survival** mode and a **Practice Range**.
+Browser FPS (Three.js + TypeScript + Vite) with a six-mission story campaign, **Low Water**, a **Wave Survival** mode and a **Practice Range**.
 
 ## Run
 
@@ -11,13 +11,47 @@ npm run sounds   # (re)generates the sound effects into public/assets/audio
 npm run dev      # http://localhost:5173
 ```
 
+## Story: Low Water
+
+Six missions in a flood city during the 40 hours before a storm surge (concept and map plans:
+[docs/story-and-maps.html](docs/story-and-maps.html)). Each has its own multi-level map, a briefing,
+radio lines with subtitles, objectives with markers, and checkpoints at every objective.
+
+| # | Mission | Map | What you do |
+| --- | --- | --- | --- |
+| 1 | Spillway | Pump station and dry dock, night, rain | Cross the quay (or go under it, or over it), open the valve, retake the control room |
+| 2 | Saltmarket | Market district at dusk, then a blackout | Pistol only: follow the courier's trail over the canal, breach the safehouse three ways |
+| 3 | Glasshouse | Trust tower around an atrium | Choose which entry stays open, hold the vault, clear the boardroom, hold the lobby |
+| 4 | Line 9 | Closed station, flashlight | Find the doctor, then escort her west through the tram and up the vent shaft as it floods |
+| 5 | Signal Hill | Sea fort in a storm | Three ways up the cliff, hold the relay during the upload, cover the gate, get back to the boat |
+| 6 | The Wall | Storm barrier, surge peak | Three piers against the clock, take the tower, lock the gates, hold, and one choice |
+
+How it is built:
+
+- `src/world/level.ts` is the level kit: slabs, walls with door and window gaps, box-tread stairs,
+  rails, floors with openings, lamps, doors that open at runtime, water sheets, and the
+  environments (night rain, dusk, overcast, underground, storm, dawn storm) with rain and lightning.
+  Maps are in `src/world/maps/`. Convention: y = 0 is the lowest walkable level of every map.
+- `src/game/mission.ts` runs a mission: stages of tasks (reach, use, clear a group, hold for a
+  time), spawn groups by faction, a radio queue, countdowns, rising water, checkpoints.
+  The missions themselves are data plus small hooks in `src/game/missions/`.
+- The engine works across floors: the navmesh keeps stairs (treads are 0.45 m deep because Recast
+  drops anything steeper), bots store what they know in 3D and take cover on their own floor, and
+  ray tests walk a grid instead of every box (`src/world/physics.ts`).
+- Adapted from the concept for now: no civilians or tailing in Saltmarket, no recon drone, gunboat
+  or wave knock-downs, and shield heavies are plain armoured heavies. Allies do not fight.
+
+With the dev server running, the console has helpers for checking a mission without playing it
+(`src/dev.ts`): `await __start('spillway')`, `__tp(x, y, z)`, `__run(seconds)`, `__kill('group')`,
+`__paths(points, pairs)`, `__st()`.
+
 ## Weapons
 
 | Key | Weapon | Notes |
 | --- | --- | --- |
 | 1 | M4A1 carbine | Full auto, red-dot sight you look through, learnable spray climb |
-| 2 | P-9 service pistol | Semi-auto, iron sights |
-| 3 | M-91 sniper | Bolt action, magnified scope overlay, hold Shift to steady your breath |
+| 2 | G19 pistol | Semi-auto 9 mm, iron sights, slide locks back on empty |
+| 3 | Ultima Ratio sniper | Bolt action with a detachable box magazine, magnified scope overlay, hold Shift to steady your breath |
 
 Switch with `1` `2` `3`, `Q` or the mouse wheel. `R` reloads (from empty the reload also
 sends the bolt or slide home), `F` inspects, `F3` shows the AI debug overlay.
@@ -91,8 +125,10 @@ Not networked yet, but the simulation runs in fixed 60 Hz ticks from serializabl
 
 ## Assets
 
-- Models, textures and HDRI: [Poly Haven](https://polyhaven.com) (CC0)
+- Models, textures and HDRI: [Poly Haven](https://polyhaven.com) (CC0) — the story maps add twelve more texture sets and about forty set-dressing props, fetched by `npm run assets`
 - "Classic M4" by [jeandiz](https://sketchfab.com/jeandiz) — [Sketchfab](https://sketchfab.com/3d-models/a747ebdbb3d941ecb09b459c62865a75), CC BY 4.0 (sling removed, lens faces removed, textures resized to 2K)
+- "Pistol 9mm - semi auto" by Hitansh_3DArtist (Sketchfab), CC BY 4.0 (exported through Blender with the muzzle down -Z, slide and magazine split into their own nodes). `public/assets/models/g19/g19.glb`
+- "PGM Ultima Ratio · Game-Ready Sniper Rifle" by flip.3d (Sketchfab), CC BY 4.0 (bipod and monopod removed, bolt and magazine split into their own nodes). `public/assets/models/ultima_ratio/ultima_ratio.glb`
 - "First Person arms" by [bumstrum](https://sketchfab.com/bumstrum) — [Sketchfab](https://sketchfab.com/3d-models/e3c42c05b22944e5839deb8e003f0987), CC BY 4.0 (bones renamed to Mixamo names, two forearm twist bones added per arm, textures as JPEG). `public/assets/characters/fp_arms.glb`; the soldier's own arms are used if it is missing.
 - "German KSK operator - rigged" and "German Bundeswehr soldier - rigged" by [42manako](https://sketchfab.com/42manako) — Sketchfab ([KSK](https://sketchfab.com/3d-models/110daf3d1884412989e41dc95866c579), [Bundeswehr](https://sketchfab.com/3d-models/3d7944fea17b494abf220cc11ddabfd1)), CC BY 4.0 (re-posed to a T-pose, bones renamed to Mixamo names, textures as JPEG)
 - "American Soldier Rigged" by [matheofrelin3](https://sketchfab.com/matheofrelin3) — [Sketchfab](https://sketchfab.com/3d-models/5b1967e7f83547be8a1c3ae656ab1ad4), CC BY 4.0 (bones renamed to Mixamo names)

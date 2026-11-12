@@ -301,19 +301,18 @@ const M4: WeaponDef = {
 // fresh magazine going into it are in view
 const P_MAG_P: V3 = [-0.035, 0.085, 0.02];
 const P_MAG_R: V3 = [0.68, 0.24, -0.58];
-// The model keeps its loaded magazine beside the gun; this puts it home in the grip. From there
-// it travels along the grip's rake: `pMag(d)` is d metres out of the magazine well.
-const P_MAG_HOME: V3 = [0, -0.012, -0.09];
-const pMag = (d: number): V3 => add(P_MAG_HOME, [0, -0.955 * d, 0.297 * d]);
-/** Seconds: magazine seated; support hand lets go of it. */
+// The magazine travels along the grip's rake: `pMag(d)` is d metres out of the magazine well.
+const pMag = (d: number): V3 => [0, -0.945 * d, 0.326 * d];
+/** Seconds: the old magazine falls away; magazine seated; support hand lets go of it. */
+const P_DROP = 0.26;
 const P_SEAT = 1.02;
 const P_LEAVE = 1.12;
 /**
  * Old magazine drops free; the hand brings a fresh one up from below the frame, stops it at the
  * mouth of the well, draws back a touch and drives it home with the heel of the palm.
  */
-const P_MAG_TRACK: Key[] = [[0, P_MAG_HOME], [0.27, P_MAG_HOME], [0.3, pMag(0.36)], [0.52, pMag(0.36)],
-  [0.84, pMag(0.085), 'out'], [0.9, pMag(0.07)], [0.95, pMag(0.078)], [P_SEAT, P_MAG_HOME, 'in']];
+const P_MAG_TRACK: Key[] = [[0, Z], [0.22, Z], [P_DROP, pMag(0.03), 'in'], [0.3, pMag(0.36)], [0.52, pMag(0.36)],
+  [0.84, pMag(0.085), 'out'], [0.9, pMag(0.07)], [0.95, pMag(0.078)], [P_SEAT, Z, 'in']];
 /** Gun movement through the magazine change, up to the moment the support hand lets go. */
 const P_SWAP_POS: Key[] = [[0, Z], [0.08, [0.003, -0.006, 0.003], 'out'], [0.26, P_MAG_P, 'out'],
   [0.31, add(P_MAG_P, [0, 0.006, 0])], [0.42, P_MAG_P],
@@ -325,8 +324,10 @@ const P_SWAP_ROT: Key[] = [[0, Z], [0.08, [-0.04, -0.02, 0.04], 'out'], [0.26, P
   [0.7, add(P_MAG_R, [-0.04, 0.02, 0.06])], [0.84, P_MAG_R],
   [0.9, add(P_MAG_R, [0.03, 0, -0.03]), 'out'], [0.96, P_MAG_R],
   [P_SEAT, add(P_MAG_R, [0.11, 0.02, -0.06]), 'in'], [P_SEAT + 0.14, P_MAG_R, 'out']];
-const P_SWAP_EVENTS: [number, string][] = [[0.1, 'cloth'], [0.22, 'mag_release'], [0.25, 'mag_out'], [0.26, 'drop:mag'],
+const P_SWAP_EVENTS: [number, string][] = [[0.1, 'cloth'], [0.22, 'mag_release'], [0.25, 'mag_out'], [P_DROP, 'drop:mag'],
   [0.44, 'pouch'], [0.86, 'mag_insert'], [P_SEAT, 'mag_in'], [P_SEAT, 'ammo']];
+/** The gun's own magazine is out of sight between the old one falling away and the fresh one coming up. */
+const P_MAG_HIDE: Record<string, [number, number]> = { mag: [P_DROP, 0.4] };
 // Empty: with the support hand back on the gun, the firing thumb drops the slide stop. An overhand
 // rack puts the support hand between the eye and a gun this small and hides it completely; this
 // keeps the pistol, and the slide running home, in plain view.
@@ -334,31 +335,29 @@ const P_REL_P: V3 = [-0.02, 0.03, 0.02];
 const P_REL_R: V3 = [0.22, 0.12, -0.2];
 /** Seconds: the slide is released. */
 const P_REL = 1.46;
+/** How far the slide runs back (metres). */
+const P_SLIDE = 0.04;
 
 const PISTOL: WeaponDef = {
   id: 'pistol',
-  name: 'P-9 Service Pistol',
+  name: 'G19 Pistol',
   slot: 1,
-  model: 'service_pistol',
-  modelRotation: [0, Math.PI / 2, 0],
-  // The file also contains a slide-locked "_b" copy of the pistol and loose magazines.
-  hideNodes: [
-    'service_pistol_magazine_empty', 'service_pistol_bullet',
-    'service_pistol_pistol_b', 'service_pistol_slide_b', 'service_pistol_hammer_b', 'service_pistol_trigger_b',
-  ],
-  parts: { slide: ['service_pistol_slide_a'], mag: ['service_pistol_magazine_loaded'], hammer: ['service_pistol_hammer_a'] },
-  hiddenParts: ['mag'],
-  fireParts: { slide: [0, 0, 0.028] },
+  // "Pistol 9mm - semi auto" by Hitansh_3DArtist (Sketchfab, CC BY 4.0), exported through Blender
+  // with the muzzle down -Z and the slide and magazine as their own nodes.
+  model: 'glb:models/g19/g19.glb',
+  modelRotation: [0, 0, 0],
+  hideNodes: [],
+  parts: { slide: ['G19_Slide'], mag: ['G19_Mag'] },
+  fireParts: { slide: [0, 0, P_SLIDE] },
   lockOnEmpty: ['slide'],
+  magRound: { size: [0.0295, 0.0048], offset: [0, 0.0005, -0.019] },
   hands: {
     // Firing hand high on the grip
     grip: { pos: [-0.0101, -0.0351, 0.0593], fwd: [0.397, 0.227, -0.889], back: [0.829, -0.175, 0.531], index: 0.5, thumb: [0.5, 0.45, 0.4] },
     // Support hand wrapped over the firing hand's fingers
     support: { over: 'grip', pos: [0.0058, -0.0346, 0.0348], fwd: [-0.382, 0.06, -0.922], back: [-0.838, -0.038, 0.544], thumb: [0.5, 0.3, 0.5] },
     // Around the magazine, fed up into the grip
-    mag: { part: 'mag', solo: true, pos: [-0.0312, -0.0789, 0.1639], fwd: [-0.085, 0.482, -0.872], back: [-0.975, -0.203, 0.087], thumb: [0.6, 0.4] },
-    // Overhand on the rear of the slide, to rack it
-    slide: { part: 'slide', pos: [-0.1009, 0.067, 0.0127], fwd: [0.919, 0.386, -0.08], back: [-0.393, 0.913, -0.109], thumb: [0.5, 0.4] },
+    mag: { part: 'mag', solo: true, pos: [-0.0312, -0.0789, 0.0739], fwd: [-0.085, 0.482, -0.872], back: [-0.975, -0.203, 0.087], thumb: [0.6, 0.4] },
     // Reaching out, palm down, for something in the world; then closed around it
     reach: { air: true, pos: [-0.07, -0.24, -0.04], fwd: [0.2, -0.45, -0.87], back: [-0.25, 0.87, -0.42], curl: 0.22, thumb: [0.3, 0.15] },
     take: { air: true, pos: [-0.07, -0.24, -0.04], fwd: [0.2, -0.45, -0.87], back: [-0.25, 0.87, -0.42], curl: 0.8, thumb: [0.7, 0.6] },
@@ -366,9 +365,9 @@ const PISTOL: WeaponDef = {
   restLeft: 'support',
   restRight: 'grip',
   hipPos: [0.105, -0.15, -0.34],
-  adsPos: [0, -0.074, -0.42],
-  muzzle: [0, 0.062, -0.18],
-  ejectPort: [0.012, 0.065, -0.02],
+  adsPos: [0.0006, -0.0766, -0.42],
+  muzzle: [0, 0.062, -0.158],
+  ejectPort: [0.012, 0.068, -0.06],
   optic: 'sights',
   damage: 34,
   headMultiplier: 3,
@@ -400,7 +399,7 @@ const PISTOL: WeaponDef = {
     reloadTactical: {
       length: 1.7,
       events: [...P_SWAP_EVENTS, [1.34, 'grip'], [1.5, 'ready']],
-      show: { mag: [0.4, P_SEAT] },
+      hide: P_MAG_HIDE,
       hands: [[0.14, 'mag', 0.24], [P_LEAVE, 'support', 0.24]],
       tracks: {
         pos: [...P_SWAP_POS, [1.5, [0.002, -0.005, 0.003], 'inout'], [1.7, Z]],
@@ -411,7 +410,7 @@ const PISTOL: WeaponDef = {
     reloadEmpty: {
       length: 1.95,
       events: [...P_SWAP_EVENTS, [1.34, 'grip'], [P_REL, 'slide'], [1.74, 'ready']],
-      show: { mag: [0.4, P_SEAT] },
+      hide: P_MAG_HIDE,
       hands: [[0.14, 'mag', 0.24], [P_LEAVE, 'support', 0.24]],
       tracks: {
         // Both hands back on the gun, a beat, then it jumps as the slide runs home
@@ -421,7 +420,7 @@ const PISTOL: WeaponDef = {
           [P_REL + 0.05, add(P_REL_R, [0.13, 0.01, -0.03]), 'out'], [P_REL + 0.2, P_REL_R], [1.78, [-0.03, -0.01, 0.03], 'inout'], [1.95, Z]],
         mag: P_MAG_TRACK,
         // The slide is locked back while empty until the stop is dropped
-        slide: [[0, [0, 0, 0.028]], [P_REL, [0, 0, 0.028]], [P_REL + 0.035, Z, 'in']],
+        slide: [[0, [0, 0, P_SLIDE]], [P_REL, [0, 0, P_SLIDE]], [P_REL + 0.035, Z, 'in']],
       },
     },
     loot: lootAnim(0.6, 'support'),
@@ -431,36 +430,80 @@ const PISTOL: WeaponDef = {
 // ---------------------------------------------------------------------------------------------
 // Sniper
 
-// Loading: the rifle comes up and rolls its open action toward the eye
-const S_LOAD_P: V3 = [-0.05, 0.05, 0.05];
-const S_LOAD_R: V3 = [0.16, 0.28, -0.6];
-// Closing the bolt: most of the way back upright
-const S_CLOSE_P: V3 = [-0.03, 0.02, 0.03];
-const S_CLOSE_R: V3 = [0.05, 0.1, -0.25];
-/** When each round is thumbed into the action. */
-const S_ROUNDS = [1.0, 1.35, 1.7];
-/** A little lift before each round, then the rifle gives under the thumb and comes back. */
-const sPress = (base: V3, give: V3, lift: V3): Key[] => S_ROUNDS.flatMap((t): Key[] => [
-  [t - 0.12, add(base, lift)], [t, add(base, give), 'in'], [t + 0.14, base, 'out'],
-]);
+// Magazine change: the rifle comes up and across and rolls its magazine well toward the support
+// hand. It is a long, heavy gun held by the pistol grip alone while the hand is away, so it moves
+// less than the carbine and sags more.
+const S_MAG_P: V3 = [-0.05, 0.075, 0.045];
+const S_MAG_R: V3 = [0.24, 0.22, -0.68];
+const S_MAG_OUT: V3 = [0.015, -0.4, 0.06];
+const S_MAG_ROT: V3 = [0.4, 0, 0.3];
+/** Seconds: magazine seated; support hand lets go of it. */
+const S_SEAT = 1.6;
+const S_LEAVE = 1.76;
+/** The box magazine comes straight down out of the well and a fresh one goes up into it. */
+const S_MAG_TRACKS: Record<string, Key[]> = {
+  mag: [[0, Z], [0.42, Z], [0.48, [0, -0.012, 0], 'out'], [0.56, [0, -0.055, -0.006]], [0.78, S_MAG_OUT, 'in'],
+    [1.12, S_MAG_OUT], [1.4, [0, -0.058, -0.006], 'out'],
+    // Stops at the mouth of the well, draws back a touch, then goes home in one push
+    [1.46, [0, -0.046, -0.004]], [1.52, [0, -0.052, -0.005]], [S_SEAT, Z, 'in']],
+  mag_rot: [[0.56, Z], [0.78, S_MAG_ROT], [1.12, S_MAG_ROT], [1.38, [0.03, 0, 0.02], 'out'], [1.46, Z]],
+};
+const S_SWAP_POS: Key[] = [[0, Z], [0.12, [0.004, -0.008, 0.004], 'out'], [0.4, S_MAG_P, 'out'],
+  [0.47, add(S_MAG_P, [0, -0.008, 0])], [0.62, S_MAG_P],
+  [1.05, add(S_MAG_P, [0.005, -0.016, 0.005])], [1.38, add(S_MAG_P, [0, 0.003, 0])],
+  [1.45, add(S_MAG_P, [0.002, 0.007, 0]), 'out'], [1.52, add(S_MAG_P, [0, -0.002, 0])],
+  [S_SEAT, add(S_MAG_P, [0.003, 0.012, 0]), 'in'], [S_SEAT + 0.14, S_MAG_P, 'out'], [S_LEAVE, S_MAG_P]];
+const S_SWAP_ROT: Key[] = [[0, Z], [0.12, [-0.025, -0.02, 0.05], 'out'], [0.4, S_MAG_R, 'out'],
+  [0.48, add(S_MAG_R, [0.03, 0, -0.04])], [0.66, S_MAG_R],
+  [1.05, add(S_MAG_R, [-0.04, 0.02, 0.08])], [1.38, add(S_MAG_R, [0.01, 0, -0.02])],
+  [1.45, add(S_MAG_R, [0.025, 0, -0.03]), 'out'], [1.52, S_MAG_R],
+  [S_SEAT, add(S_MAG_R, [0.05, 0.01, -0.06]), 'in'], [S_SEAT + 0.16, S_MAG_R, 'out'], [S_LEAVE, S_MAG_R]];
+const S_SWAP_EVENTS: [number, string][] = [[0.06, 'cloth'], [0.38, 'mag_release'], [0.42, 'mag_out'], [0.84, 'pouch'],
+  [1.41, 'mag_insert'], [S_SEAT, 'mag_in'], [S_SEAT, 'ammo']];
+
+/** How far the bolt is lifted (radians) and drawn back (metres). */
+const S_BOLT_LIFT: V3 = [0, 0, 1.0];
+const S_BOLT_BACK: V3 = [0, 0, 0.095];
+/**
+ * Working the bolt, starting at `t`: the firing hand goes to the knob, lifts it, draws the bolt
+ * back, shoves it forward and turns it down. The rifle is dragged back with the bolt and shoved
+ * forward as it closes.
+ */
+function boltWork(t: number): { pos: Key[]; rot: Key[]; bolt: Key[]; bolt_rot: Key[] } {
+  return {
+    pos: [[t + 0.2, [-0.02, -0.02, 0.03]], [t + 0.3, [-0.022, -0.016, 0.034]], [t + 0.45, [-0.02, -0.022, 0.046], 'out'],
+      [t + 0.52, [-0.02, -0.02, 0.04]], [t + 0.62, [-0.02, -0.02, 0.018], 'in'], [t + 0.72, [-0.02, -0.022, 0.03], 'out']],
+    rot: [[t + 0.2, [0.0, 0.1, -0.25]], [t + 0.3, [0.01, 0.1, -0.31], 'out'], [t + 0.45, [0.035, 0.11, -0.27], 'out'],
+      [t + 0.62, [-0.02, 0.09, -0.25], 'in'], [t + 0.72, [0.0, 0.1, -0.2], 'out']],
+    bolt_rot: [[t + 0.22, Z], [t + 0.32, S_BOLT_LIFT, 'out'], [t + 0.62, S_BOLT_LIFT], [t + 0.72, Z, 'in']],
+    bolt: [[t + 0.32, Z], [t + 0.45, S_BOLT_BACK, 'out'], [t + 0.52, S_BOLT_BACK], [t + 0.62, Z, 'in']],
+  };
+}
+const S_CYCLE = boltWork(0);
+/** Empty reload: the bolt is worked once the support hand is back under the fore-end. */
+const S_CHAMBER_T = 1.98;
+const S_CHAMBER = boltWork(S_CHAMBER_T);
 
 const SNIPER: WeaponDef = {
   id: 'sniper',
-  name: 'M-91 Sniper Rifle',
+  name: 'Ultima Ratio Sniper Rifle',
   slot: 2,
-  model: 'bolt_action_rifle_7_62',
-  modelRotation: [0, Math.PI / 2, 0],
-  hideNodes: ['bolt_action_rifle_7_62_bullet_54mm'],
-  parts: { bolt: ['bolt_action_rifle_7_62_bolt_a', 'bolt_action_rifle_7_62_bolt_b'] },
+  // "PGM Ultima Ratio · Game-Ready Sniper Rifle" by flip.3d (Sketchfab, CC BY 4.0), exported through
+  // Blender with the muzzle down -Z, the bolt and magazine as their own nodes, bipod and monopod removed.
+  model: 'glb:models/ultima_ratio/ultima_ratio.glb',
+  modelRotation: [0, 0, 0],
+  hideNodes: [],
+  parts: { bolt: ['UR_Bolt'], mag: ['UR_Mag'] },
+  magRound: { size: [0.071, 0.006] },
   hands: {
-    // Firing hand on the wrist of the stock
-    grip: { pos: [-0.0113, 0.0087, 0.4809], fwd: [0.45, -0.462, -0.764], back: [0.68, 0.203, 0.705], index: 0.5, thumb: [0.5, 0.4, 0.6] },
+    // Firing hand around the pistol grip, index finger laid along the chassis
+    grip: { pos: [-0.008, -0.085, 0.43], fwd: [0.432, 0.265, -0.862], back: [0.799, -0.168, 0.578], index: 0.55, thumb: [0.6, 0.35, 0.6] },
     // Support hand under the fore-end
-    guard: { pos: [-0.0709, -0.0066, 0.0884], fwd: [0.917, -0.088, -0.389], back: [-0.13, -0.99, -0.06], shape: [0.9, 0.45, 0.3], thumb: [-0.4, 0.1, 0] },
+    guard: { pos: [-0.07, -0.01, 0.03], fwd: [0.917, -0.088, -0.389], back: [-0.13, -0.99, -0.06], shape: [0.9, 0.45, 0.3], thumb: [-0.4, 0.1, 0] },
     // Palm on the bolt knob
-    bolt: { part: 'bolt', pos: [0.0814, 0.0732, 0.2918], fwd: [-0.605, 0.411, -0.682], back: [0.709, 0.705, 0], thumb: [0.6, 0.4] },
-    // Fingers pressing rounds down into the open action
-    port: { pos: [0.0479, 0.1245, 0.3104], fwd: [-0.761, 0.174, -0.625], back: [0.497, 0.85, 0.175], curl: 0.5 },
+    bolt: { part: 'bolt', pos: [0.108, 0.072, 0.305], fwd: [-0.605, 0.411, -0.682], back: [0.709, 0.705, 0], thumb: [0.6, 0.4] },
+    // Around the box magazine, to pull it and to seat the fresh one
+    mag: { part: 'mag', solo: true, pos: [-0.012, -0.105, 0.262], fwd: [0.114, 0.287, -0.951], back: [-0.988, -0.066, -0.138], thumb: [0.6, 0.4] },
     // Reaching out, palm down, for something in the world; then closed around it
     reach: { air: true, pos: [-0.09, -0.28, -0.08], fwd: [0.2, -0.45, -0.87], back: [-0.25, 0.87, -0.42], curl: 0.22, thumb: [0.3, 0.15] },
     take: { air: true, pos: [-0.09, -0.28, -0.08], fwd: [0.2, -0.45, -0.87], back: [-0.25, 0.87, -0.42], curl: 0.8, thumb: [0.7, 0.6] },
@@ -468,9 +511,9 @@ const SNIPER: WeaponDef = {
   restLeft: 'guard',
   restRight: 'grip',
   hipPos: [0.135, -0.165, -0.6],
-  adsPos: [0, -0.08, -0.42],
-  muzzle: [0, 0.02, -0.64],
-  ejectPort: [0.02, 0.05, 0.22],
+  adsPos: [0, -0.135, -0.45],
+  muzzle: [0, 0.0625, -0.49],
+  ejectPort: [0.022, 0.068, 0.16],
   optic: 'scope',
   damage: 115,
   headMultiplier: 2.5,
@@ -504,38 +547,42 @@ const SNIPER: WeaponDef = {
       events: [[0.23, 'bolt_up'], [0.3, 'bolt'], [0.42, 'eject'], [0.52, 'bolt_fwd'], [0.62, 'charge_fwd'], [0.9, 'ready']],
       rhands: [[0.12, 'bolt'], [0.78, 'grip']],
       tracks: {
-        // The rifle is dragged back with the bolt and shoved forward as it closes
-        pos: [[0, Z], [0.2, [-0.02, -0.02, 0.03]], [0.3, [-0.022, -0.016, 0.034]], [0.45, [-0.02, -0.022, 0.046], 'out'],
-          [0.52, [-0.02, -0.02, 0.04]], [0.62, [-0.02, -0.02, 0.018], 'in'], [0.72, [-0.02, -0.022, 0.03], 'out'], [0.95, Z]],
-        rot: [[0, Z], [0.2, [0.0, 0.1, -0.25]], [0.3, [0.01, 0.1, -0.31], 'out'], [0.45, [0.035, 0.11, -0.27], 'out'],
-          [0.62, [-0.02, 0.09, -0.25], 'in'], [0.72, [0.0, 0.1, -0.2], 'out'], [0.95, Z]],
-        bolt_rot: [[0.22, Z], [0.32, [0, 0, 1.0], 'out'], [0.62, [0, 0, 1.0]], [0.72, Z, 'in']],
-        bolt: [[0.32, Z], [0.45, [0, 0, 0.09], 'out'], [0.52, [0, 0, 0.09]], [0.62, Z, 'in']],
+        pos: [[0, Z], ...S_CYCLE.pos, [0.95, Z]],
+        rot: [[0, Z], ...S_CYCLE.rot, [0.95, Z]],
+        bolt_rot: S_CYCLE.bolt_rot,
+        bolt: S_CYCLE.bolt,
       },
     },
+    // A round is still chambered: only the magazine is changed
     reloadTactical: {
-      length: 3.0,
-      events: [[0.08, 'cloth'], [0.17, 'bolt_up'], [0.3, 'bolt'], [0.58, 'pouch'], [1.0, 'round_in'], [1.35, 'round_in'], [1.7, 'round_in'], [1.7, 'ammo'],
-        [2.18, 'bolt_fwd'], [2.3, 'charge_fwd'], [2.62, 'grip'], [2.8, 'ready']],
-      rhands: [[0.1, 'bolt'], [0.55, 'port'], [2.0, 'bolt'], [2.5, 'grip']],
+      length: 2.45,
+      events: [...S_SWAP_EVENTS, [2.1, 'grip'], [2.2, 'ready']],
+      hands: [[0.12, 'mag', 0.26], [S_LEAVE, 'guard', 0.32]],
       tracks: {
-        pos: [[0, Z], [0.1, [0.003, -0.006, 0.004], 'out'], [0.3, S_LOAD_P], [0.48, add(S_LOAD_P, [0, 0, 0.012]), 'out'], [0.62, S_LOAD_P],
-          ...sPress(S_LOAD_P, [0, -0.012, 0], [0, 0.003, 0]),
-          [2.1, S_CLOSE_P], [2.28, add(S_CLOSE_P, [0, 0, -0.012]), 'in'], [2.42, S_CLOSE_P, 'out'],
-          [2.8, [0.003, -0.006, 0.004], 'inout'], [3.0, Z]],
-        rot: [[0, Z], [0.1, [-0.02, -0.02, 0.05], 'out'], [0.3, S_LOAD_R], [0.48, add(S_LOAD_R, [0.03, 0, -0.03]), 'out'], [0.62, S_LOAD_R],
-          ...sPress(S_LOAD_R, [0.025, 0, -0.035], Z),
-          [2.1, S_CLOSE_R], [2.28, add(S_CLOSE_R, [-0.07, -0.01, 0]), 'in'], [2.42, add(S_CLOSE_R, [-0.03, 0, 0.03]), 'out'],
-          [2.8, [-0.02, -0.015, 0.04], 'inout'], [3.0, Z]],
-        bolt_rot: [[0.15, Z], [0.3, [0, 0, 1.0], 'out'], [2.3, [0, 0, 1.0]], [2.42, Z, 'in']],
-        bolt: [[0.3, Z], [0.48, [0, 0, 0.09], 'out'], [2.1, [0, 0, 0.09]], [2.28, Z, 'in']],
+        // Back to the shoulder past level, then settling: the weight carries a little too far
+        pos: [...S_SWAP_POS, [2.2, [0.004, -0.008, 0.005], 'inout'], [2.45, Z]],
+        rot: [...S_SWAP_ROT, [2.2, [-0.03, -0.015, 0.05], 'inout'], [2.45, Z]],
+        ...S_MAG_TRACKS,
       },
     },
-    reloadEmpty: null as unknown as Timeline, // same as tactical (set below)
+    // Dry: fresh magazine, then the bolt is worked to chamber the first round
+    reloadEmpty: {
+      length: 3.15,
+      events: [...S_SWAP_EVENTS, [2.08, 'grip'], [S_CHAMBER_T + 0.23, 'bolt_up'], [S_CHAMBER_T + 0.3, 'bolt'],
+        [S_CHAMBER_T + 0.52, 'bolt_fwd'], [S_CHAMBER_T + 0.62, 'charge_fwd'], [S_CHAMBER_T + 0.95, 'ready']],
+      hands: [[0.12, 'mag', 0.26], [S_LEAVE, 'guard', 0.32]],
+      rhands: [[S_CHAMBER_T + 0.1, 'bolt'], [S_CHAMBER_T + 0.78, 'grip']],
+      tracks: {
+        pos: [...S_SWAP_POS, ...S_CHAMBER.pos, [3.15, Z]],
+        rot: [...S_SWAP_ROT, ...S_CHAMBER.rot, [3.15, Z]],
+        ...S_MAG_TRACKS,
+        bolt_rot: S_CHAMBER.bolt_rot,
+        bolt: S_CHAMBER.bolt,
+      },
+    },
     loot: lootAnim(1.6, 'guard'),
   },
 };
-SNIPER.anims.reloadEmpty = SNIPER.anims.reloadTactical;
 
 export const WEAPONS: WeaponDef[] = [M4, PISTOL, SNIPER];
 

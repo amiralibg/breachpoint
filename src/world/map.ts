@@ -1,29 +1,92 @@
 import * as THREE from 'three';
 import { FOG_COLOR, installSunFog, makeSky } from './sky';
 import { loadModel, loadPbr, pbrMaterial } from '../core/assets';
+import type { Audio } from '../core/audio';
 import type { QualityPreset } from '../core/settings';
+import type { BuiltLevel, Rect, Surface, V3, Water } from './level';
+
+export type WorldId = 'compound' | 'spillway' | 'saltmarket' | 'glasshouse' | 'line9' | 'signalhill' | 'wall';
 
 export interface WorldMap {
+  id: WorldId;
   root: THREE.Group;
   colliders: THREE.Box3[];
   bounds: THREE.Box3;
   playerSpawns: THREE.Vector3[];
   enemySpawns: THREE.Vector3[];
+  /** Way the player faces on arrival (radians, 0 = toward -z). */
+  spawnYaw: number;
   sun: THREE.DirectionalLight;
   /** Unit vector toward the sun. */
   sunDir: THREE.Vector3;
   sunColor: THREE.Color;
   envMap: THREE.Texture;
-  /** Per-frame: drifts the clouds and keeps the sky centred on the viewer. */
-  update(dt: number, viewer: THREE.Vector3): void;
+  /** Light and weather facts the game needs: weapon lighting, bot perception, flashlight. */
+  env: { viewLight: number; shafts: number; sight: number; hearing: number; flashlight: boolean };
+  /** Rectangles of walkable ground at y = 0 (default: everywhere inside the bounds). */
+  navGround?: Rect[];
+  /** Menu camera: orbits this point. */
+  menuCam: { center: THREE.Vector3; radius: number; height: number };
+  waters: Water[];
+  /** Lightning brightness right now, 0..1. */
+  readonly flash: number;
+  surface(p: { x: number; y: number; z: number }): Surface;
+  /** Open or close a named door/shutter. True if it changed (navigation must be rebuilt). */
+  setDoor(id: string, open: boolean): boolean;
+  setPower(on: boolean): void;
+  setDaylight(f: number): void;
+  /** Per-frame: sky, lamps, weather. */
+  update(dt: number, viewer: THREE.Vector3, audio?: Audio): void;
   dispose(): void;
+}
+
+let activeSurface: WorldMap['surface'] | null = null;
+
+/** The map whose ground `surfaceAt` describes. */
+export function setActiveMap(map: WorldMap): void {
+  activeSurface = map.surface;
+}
+
+/** Wrap a level built with the kit as a WorldMap. */
+export function worldFromLevel(id: WorldId, level: BuiltLevel, extra: {
+  bounds: THREE.Box3; spawn: V3; spawnYaw?: number; enemySpawns?: V3[]; navGround?: Rect[];
+  menuCam?: { center: V3; radius: number; height: number }; surface?: WorldMap['surface'];
+}): WorldMap {
+  const c = extra.bounds.getCenter(new THREE.Vector3());
+  return {
+    id,
+    root: level.root, colliders: level.colliders, bounds: extra.bounds,
+    playerSpawns: [new THREE.Vector3(...extra.spawn)],
+    enemySpawns: (extra.enemySpawns ?? []).map((p) => new THREE.Vector3(...p)),
+    spawnYaw: extra.spawnYaw ?? 0,
+    sun: level.sun, sunDir: level.sunDir, sunColor: level.sunColor, envMap: level.envMap,
+    env: level.env,
+    navGround: extra.navGround,
+    menuCam: extra.menuCam
+      ? { center: new THREE.Vector3(...extra.menuCam.center), radius: extra.menuCam.radius, height: extra.menuCam.height }
+      : { center: c, radius: 30, height: c.y + 16 },
+    waters: level.waters,
+    get flash() {
+      return level.flash;
+    },
+    surface: extra.surface ?? (() => 'hard'),
+    setDoor: (id2, open) => level.setDoor(id2, open),
+    setPower: (on) => level.setPower(on),
+    setDaylight: (f) => level.setDaylight(f),
+    update: (dt, viewer, audio) => level.update(dt, viewer, audio),
+    dispose: () => level.dispose(),
+  };
 }
 
 const HALF = 40; // the playable area is 80 x 80 m
 const ROAD_HALF_W = 4.5;
 
 /** Ground material under a point (for footsteps): the asphalt road and anything raised are hard. */
-export function surfaceAt(p: { x: number; y: number; z: number }): 'dirt' | 'hard' {
+export function surfaceAt(p: { x: number; y: number; z: number }): Surface {
+  return activeSurface ? activeSurface(p) : 'hard';
+}
+
+function compoundSurface(p: { x: number; y: number; z: number }): Surface {
   if (p.y > 0.2) return 'hard';
   return Math.abs(p.x) < ROAD_HALF_W && Math.abs(p.z) < HALF ? 'hard' : 'dirt';
 }
@@ -335,6 +398,16 @@ export async function buildMap(scene: THREE.Scene, q: QualityPreset, gl: THREE.W
   const bounds = new THREE.Box3(new THREE.Vector3(-HALF, 0, -HALF), new THREE.Vector3(HALF, 20, HALF));
 
   return {
+    id: 'compound',
+    spawnYaw: 0,
+    env: { viewLight: 1, shafts: 0.4, sight: 1, hearing: 1, flashlight: false },
+    menuCam: { center: new THREE.Vector3(0, 1.5, 0), radius: 24, height: 13 },
+    waters: [],
+    flash: 0,
+    surface: compoundSurface,
+    setDoor: () => false,
+    setPower: () => {},
+    setDaylight: () => {},
     root,
     colliders,
     bounds,
