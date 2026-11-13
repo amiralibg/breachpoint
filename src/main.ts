@@ -1,5 +1,5 @@
 import { onProgress } from './core/assets';
-import { devEnabled, devState } from './devflags';
+import { devState } from './devflags';
 import { loadSettings, QUALITY_PRESETS, saveSettings, type QualityLevel } from './core/settings';
 import { Game } from './game/game';
 import { CAMPAIGN } from './game/campaign';
@@ -175,7 +175,7 @@ function openBriefing(def: MissionDef): void {
   game.loadWorld(def.map, true).then(() => {
     if (mission !== def) return;
     btn.disabled = fresh.disabled = false;
-    btn.querySelector('b')!.textContent = res ? 'Resume from checkpoint' : 'Deploy';
+    btn.querySelector('b')!.textContent = res ? 'Resume checkpoint' : 'Deploy';
   }).catch((err: unknown) => {
     console.error(err);
     btn.querySelector('b')!.textContent = 'Failed to load (see console)';
@@ -201,6 +201,9 @@ onProgress((loaded, total) => {
   $('loadbar-fill').style.width = `${(loaded / total) * 100}%`;
   $('loading-text').textContent = `Loading assets… ${loaded}/${total}`;
 });
+
+// Phones and tablets: the controls screen shows the touch layout
+if (document.body.classList.contains('touch')) $('controls-hint').textContent = 'Touch controls';
 
 game.load().then(() => {
   game.hud.setFpsVisible(settings.showFps);
@@ -382,6 +385,11 @@ function syncSettingsUi(): void {
   $<HTMLInputElement>('vol').value = String(settings.volume);
   $('vol-out').textContent = `${Math.round(settings.volume * 100)}%`;
   $<HTMLInputElement>('showfps').checked = settings.showFps;
+  // The slider tracks fill up to the thumb
+  document.querySelectorAll<HTMLInputElement>('#settings input[type=range]').forEach((r) => {
+    const min = Number(r.min), max = Number(r.max);
+    r.style.setProperty('--p', `${((Number(r.value) - min) / (max - min)) * 100}%`);
+  });
 }
 
 document.querySelectorAll<HTMLButtonElement>('#quality button').forEach((b) =>
@@ -410,8 +418,9 @@ async function applySettings(): Promise<void> {
   await game.applySettings(settings);
 }
 
-// Developer options (F2): in the dev server, or anywhere with ?dev=1
-if (devEnabled()) {
+// Developer options (F2): only in the local dev server. The check is the bare build constant so
+// the bundler drops the panel from production builds entirely.
+if (import.meta.env.DEV) {
   void import('./ui/devpanel').then((m) => m.installDevPanel(game, {
     async startMission(id) {
       const def = CAMPAIGN.find((c) => c.id === id);

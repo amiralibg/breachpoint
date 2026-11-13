@@ -1,20 +1,8 @@
 /**
- * Developer mode: on in the dev server, or anywhere (a deployed build too) with `?dev=1` in the
- * URL. `?dev=1` is remembered in this browser until `?dev=0`.
+ * Developer mode is the local dev server only (`npm run dev`): main.ts loads the panel behind
+ * `import.meta.env.DEV`, a build-time constant, so production builds (`npm run build`, Docker)
+ * contain no developer code and no URL flag can turn it on.
  */
-const KEY = 'breachpoint.dev';
-
-export function devEnabled(): boolean {
-  if (import.meta.env.DEV) return true;
-  try {
-    const q = new URLSearchParams(location.search).get('dev');
-    if (q === '1') localStorage.setItem(KEY, '1');
-    if (q === '0') localStorage.removeItem(KEY);
-    return localStorage.getItem(KEY) === '1';
-  } catch {
-    return false;
-  }
-}
 
 /** All chapters open (set by the developer panel). */
 export const devState = { unlockAll: false };

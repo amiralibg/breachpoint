@@ -843,7 +843,7 @@ export class LevelBuilder {
         scene.remove(root);
         root.traverse((o) => {
           const m = o as THREE.Mesh;
-          if (m.isMesh && m.geometry && !(m.geometry as THREE.BufferGeometry).userData.shared) m.geometry.dispose();
+          if (m.geometry && !(m.geometry as THREE.BufferGeometry).userData.shared) m.geometry.dispose(); // meshes, lines (rain) and points
         });
         for (const m of owned) {
           releaseTextures(m);
@@ -853,6 +853,8 @@ export class LevelBuilder {
         sky.material.dispose();
         rain?.material.dispose();
         envTarget.dispose();
+        // The sun owns its shadow map (up to 4096², 64 MB of depth): free it with the map
+        sun.dispose();
       },
     };
     return level;
