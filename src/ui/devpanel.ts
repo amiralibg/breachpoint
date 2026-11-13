@@ -8,7 +8,7 @@ import type { MissionMode } from '../game/mission';
  * Developer options: F2 (or the DEV button on touch screens) opens a panel to jump around the
  * game and check things without playing through: any chapter, skip or reach the objective, god
  * mode, ammo, slow motion, frozen bots, a free-fly camera, hidden HUD, live render stats and a
- * screenshot. Only installed when developer mode is on (see devflags.ts).
+ * screenshot. Only installed in the local dev server (see devflags.ts).
  */
 
 export interface DevApi {

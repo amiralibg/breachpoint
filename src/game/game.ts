@@ -192,6 +192,8 @@ export class Game {
       this.effects.clear();
       this.phys.clear();
       this.loot.clear();
+      // Let go of the old sun before its shadow map is freed: the haze pass samples it every frame
+      if (this.map) this.renderer.setSun(this.map.sunDir, this.map.sunColor, 0, null);
       this.map?.dispose();
       this.map = await buildWorld(id, this.scene, this.preset, this.renderer.gl);
       setActiveMap(this.map);

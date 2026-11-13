@@ -112,11 +112,18 @@ interface Particle {
 }
 
 interface Tracer {
-  line: THREE.Line;
+  line: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
   life: number;
 }
 
-/** Bullet holes, dust/spark/blood puffs and tracers, all pooled. */
+/** Explosion flashes at once (each costs a little shading everywhere); a new blast takes the oldest. */
+const BLAST_LIGHTS = 1;
+
+/**
+ * Bullet holes, dust/spark/blood puffs and tracers, all pooled: a sprite, line or light is made
+ * once and reused, so firing allocates nothing on the GPU and never changes the scene's light
+ * count (which would recompile every material's shader in the middle of a fight).
+ */
 export class Effects {
   private decals: THREE.Mesh[] = [];
   private decalIdx = 0;
@@ -136,11 +143,27 @@ export class Effects {
     map: poolTexture, transparent: true, depthWrite: false, roughness: 0.08, metalness: 0,
     polygonOffset: true, polygonOffsetFactor: -3,
   });
+  private scorchMat = new THREE.MeshStandardMaterial({
+    map: poolTexture, color: 0x111111, transparent: true, depthWrite: false, roughness: 1, metalness: 0,
+    polygonOffset: true, polygonOffsetFactor: -3,
+  });
   private splats: THREE.Mesh[] = [];
   private pools: Pool[] = [];
   private unitPlane = new THREE.PlaneGeometry(1, 1);
+  /** Spent sprites and tracer lines, hidden, waiting to be reused. */
+  private freeSprites: THREE.Sprite[] = [];
+  private freeTracers: Tracer['line'][] = [];
+  private lights: { light: THREE.PointLight; life: number; max: number; peak: number }[] = [];
+  private nextLight = 0;
 
-  constructor(private scene: THREE.Scene, private maxDecals: number) {}
+  constructor(private scene: THREE.Scene, private maxDecals: number) {
+    // Always in the scene, dark until a blast: the light count (part of every shader) never changes
+    for (let i = 0; i < BLAST_LIGHTS; i++) {
+      const light = new THREE.PointLight(0xffa050, 0, 18, 2);
+      scene.add(light);
+      this.lights.push({ light, life: 0, max: 1, peak: 0 });
+    }
+  }
 
   setMaxDecals(n: number): void {
     this.maxDecals = n;
@@ -170,14 +193,18 @@ export class Effects {
   }
 
   private spawn(pos: THREE.Vector3, vel: THREE.Vector3, color: THREE.ColorRepresentation, size: number, life: number, grow: number, gravity: number, additive = false): void {
-    const mat = new THREE.SpriteMaterial({
-      map: puffTexture, color, transparent: true, depthWrite: false,
-      blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
-    });
-    const s = new THREE.Sprite(mat);
+    let s = this.freeSprites.pop();
+    if (!s) {
+      s = new THREE.Sprite(new THREE.SpriteMaterial({ map: puffTexture, transparent: true, depthWrite: false }));
+      this.scene.add(s);
+    }
+    const mat = s.material;
+    mat.color.set(color);
+    mat.opacity = 1;
+    mat.blending = additive ? THREE.AdditiveBlending : THREE.NormalBlending;
+    s.visible = true;
     s.position.copy(pos);
     s.scale.setScalar(size);
-    this.scene.add(s);
     this.particles.push({ sprite: s, vel, life, maxLife: life, grow, gravity });
   }
 
@@ -251,9 +278,7 @@ export class Effects {
       const v = new THREE.Vector3((Math.random() - 0.5) * 18, 3 + Math.random() * 9, (Math.random() - 0.5) * 18);
       this.spawn(point.clone().add(new THREE.Vector3(0, 0.2, 0)), v, 0xffc070, 0.05, 0.5 + Math.random() * 0.4, 0, 12, true);
     }
-    const scorch = new THREE.Mesh(this.unitPlane, this.poolMat.clone());
-    (scorch.material as THREE.MeshStandardMaterial).color.set(0x111111);
-    (scorch.material as THREE.MeshStandardMaterial).roughness = 1;
+    const scorch = new THREE.Mesh(this.unitPlane, this.scorchMat);
     scorch.userData.noAO = true;
     scorch.rotation.x = -Math.PI / 2;
     scorch.rotation.z = Math.random() * Math.PI * 2;
@@ -261,30 +286,38 @@ export class Effects {
     scorch.scale.setScalar(2.4);
     this.scene.add(scorch);
     this.splats.push(scorch);
-    const light = new THREE.PointLight(0xffa050, 120, 18, 2);
-    light.position.copy(point).setY(point.y + 0.8);
-    this.scene.add(light);
-    this.lights.push({ light, life: 0.35, max: 0.35, peak: 120 });
+    if (this.splats.length > Math.max(12, this.maxDecals / 3)) this.scene.remove(this.splats.shift()!);
+    const l = this.lights[this.nextLight];
+    this.nextLight = (this.nextLight + 1) % this.lights.length;
+    l.light.position.copy(point).setY(point.y + 0.8);
+    l.life = l.max = 0.35;
+    l.peak = 120;
+    l.light.intensity = l.peak;
   }
 
-  private lights: { light: THREE.PointLight; life: number; max: number; peak: number }[] = [];
-
   tracer(from: THREE.Vector3, to: THREE.Vector3): void {
-    const g = new THREE.BufferGeometry().setFromPoints([from, to]);
-    const line = new THREE.Line(g, this.tracerMat.clone());
-    this.scene.add(line);
+    let line = this.freeTracers.pop();
+    if (!line) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(6, 3));
+      line = new THREE.Line(g, this.tracerMat.clone());
+      line.frustumCulled = false; // a two-point line: cheaper to draw than to keep its bounds fresh
+      this.scene.add(line);
+    }
+    const pos = line.geometry.attributes.position as THREE.BufferAttribute;
+    pos.setXYZ(0, from.x, from.y, from.z);
+    pos.setXYZ(1, to.x, to.y, to.z);
+    pos.needsUpdate = true;
+    line.material.opacity = 0.6;
+    line.visible = true;
     this.tracers.push({ line, life: 0.06 });
   }
 
   update(dt: number): void {
-    for (let i = this.lights.length - 1; i >= 0; i--) {
-      const l = this.lights[i];
+    for (const l of this.lights) {
+      if (l.life <= 0) continue;
       l.life -= dt;
       l.light.intensity = Math.max(0, l.life / l.max) ** 2 * l.peak;
-      if (l.life <= 0) {
-        this.scene.remove(l.light);
-        this.lights.splice(i, 1);
-      }
     }
     for (const p of this.pools) {
       p.age += dt;
@@ -295,8 +328,8 @@ export class Effects {
       const p = this.particles[i];
       p.life -= dt;
       if (p.life <= 0) {
-        this.scene.remove(p.sprite);
-        p.sprite.material.dispose();
+        p.sprite.visible = false;
+        this.freeSprites.push(p.sprite);
         this.particles.splice(i, 1);
         continue;
       }
@@ -310,9 +343,8 @@ export class Effects {
       const t = this.tracers[i];
       t.life -= dt;
       if (t.life <= 0) {
-        this.scene.remove(t.line);
-        t.line.geometry.dispose();
-        (t.line.material as THREE.Material).dispose();
+        t.line.visible = false;
+        this.freeTracers.push(t.line);
         this.tracers.splice(i, 1);
       }
     }
@@ -325,11 +357,20 @@ export class Effects {
     this.pools = [];
     for (const d of this.decals) this.scene.remove(d);
     this.decals = [];
-    for (const p of this.particles) this.scene.remove(p.sprite);
+    // Pooled sprites, lines and lights stay in the scene, hidden or dark, for the next map
+    for (const p of this.particles) {
+      p.sprite.visible = false;
+      this.freeSprites.push(p.sprite);
+    }
     this.particles = [];
-    for (const t of this.tracers) this.scene.remove(t.line);
+    for (const t of this.tracers) {
+      t.line.visible = false;
+      this.freeTracers.push(t.line);
+    }
     this.tracers = [];
-    for (const l of this.lights) this.scene.remove(l.light);
-    this.lights = [];
+    for (const l of this.lights) {
+      l.life = 0;
+      l.light.intensity = 0;
+    }
   }
 }

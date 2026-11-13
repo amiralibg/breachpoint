@@ -5,7 +5,8 @@ import type { Input } from '../core/input';
  * keyboard and mouse would (virtual key codes, look deltas, an analog stick), so the command
  * builder, the simulation and any future netcode see no difference.
  *
- *  - left half: a floating stick that appears under the thumb; push past the ring to sprint
+ *  - left side: a movement stick resting in the corner; it jumps to wherever the thumb lands and
+ *    goes back to the corner on release; push past the ring to sprint
  *  - right half: drag to look
  *  - fire also steers while held (aim and shoot with one thumb)
  *  - aim and crouch toggle; reload, jump, weapon swap tap
@@ -52,7 +53,7 @@ export class TouchControls {
     root.innerHTML = `
       <div class="t-zone t-move"></div>
       <div class="t-zone t-look"></div>
-      <div class="t-stick hidden"><i></i></div>
+      <div class="t-stick rest"><i></i><span>MOVE</span></div>
       <button class="t-btn t-pause" aria-label="Pause"><span></span><span></span></button>
       <button class="t-btn t-fire" aria-label="Fire"></button>
       <button class="t-btn t-aim" aria-label="Aim">AIM</button>
@@ -68,6 +69,7 @@ export class TouchControls {
     const $ = <T extends HTMLElement>(sel: string): T => root.querySelector(sel) as T;
     this.stickBase = $('.t-stick');
     this.stickKnob = $('.t-stick i');
+    this.stickHome();
 
     this.moveZone($('.t-move'));
     this.lookSurface($('.t-look'));
@@ -114,9 +116,17 @@ export class TouchControls {
     this.ctx = c;
   }
 
+  /** The stick back in its corner, faded, waiting for the left thumb. */
+  private stickHome(): void {
+    this.stickBase.style.left = this.stickBase.style.top = '';
+    this.stickKnob.style.transform = 'translate(-50%, -50%)';
+    this.stickBase.classList.add('rest');
+    this.stickBase.classList.remove('sprint');
+  }
+
   private reset(): void {
     this.stick = null;
-    this.stickBase.classList.add('hidden');
+    this.stickHome();
     this.looks.clear();
     this.input.stickX = this.input.stickY = 0;
     this.input.fire = false;
@@ -209,7 +219,7 @@ export class TouchControls {
       this.stickBase.style.left = `${e.clientX}px`;
       this.stickBase.style.top = `${e.clientY}px`;
       this.stickKnob.style.transform = 'translate(-50%, -50%)';
-      this.stickBase.classList.remove('hidden');
+      this.stickBase.classList.remove('rest');
     });
     el.addEventListener('pointermove', (e) => {
       const s = this.stick;
@@ -244,7 +254,7 @@ export class TouchControls {
       this.stick = null;
       this.input.stickX = this.input.stickY = 0;
       this.setSprint(false);
-      this.stickBase.classList.add('hidden');
+      this.stickHome();
     };
     el.addEventListener('pointerup', end);
     el.addEventListener('pointercancel', end);

@@ -430,11 +430,13 @@ export async function buildMap(scene: THREE.Scene, q: QualityPreset, gl: THREE.W
       scene.remove(root);
       root.traverse((o) => {
         const m = o as THREE.Mesh;
-        if (m.isMesh && m.geometry && !(m.geometry as THREE.BufferGeometry).userData.shared) m.geometry.dispose();
+        if (m.geometry && !(m.geometry as THREE.BufferGeometry).userData.shared) m.geometry.dispose(); // meshes, lines (rain) and points
       });
       Object.values(mats).forEach((m) => m.dispose());
       sky.material.dispose();
       envTarget.dispose();
+      // The sun owns its shadow map: free it with the map
+      sun.dispose();
     },
   };
 }

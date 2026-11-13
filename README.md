@@ -27,9 +27,10 @@ npm run dev      # http://localhost:5173
 
 ## Developer options
 
-`F2` opens a developer panel (on a phone, the **DEV** button next to pause). It is on in the dev server,
-and in any build with `?dev=1` in the URL (remembered until `?dev=0`), so a deployed copy can be
-checked the same way:
+`F2` opens a developer panel (on a phone, the **DEV** button next to pause). It only exists in the
+local dev server (`npm run dev`); production builds (`npm run build`, Docker) leave it out of the
+bundle, so a deployed copy has no way to open it. To try it on a phone, run
+`npx vite --host` and open the Network URL it prints, adding `?touch=1` on a desktop browser.
 
 - start any chapter, skip the current objective, jump to it, restart the checkpoint, kill every bot
 - god mode, infinite ammo, frozen bots, time scale from 0.1× to 2×
