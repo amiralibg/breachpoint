@@ -1,6 +1,19 @@
 # BREACHPOINT
 
-Browser FPS (Three.js + TypeScript + Vite) with a six-mission story campaign, **Low Water**, a **Wave Survival** mode and a **Practice Range**.
+Browser FPS (Three.js + TypeScript + Vite) with a six-mission story campaign, **Low Water**, a **Wave Survival** mode and a **Practice Range**. Plays with mouse and keyboard, or with touch controls on phones and tablets.
+
+![The Wall: the storm barrier at surge peak](docs/screenshots/wall.jpg)
+
+| | |
+| --- | --- |
+| ![Spillway: the pump station quay at night in the rain](docs/screenshots/spillway.jpg) | ![Saltmarket: the market district at dusk](docs/screenshots/saltmarket.jpg) |
+| **1 · Spillway**: the pump station quay, night, rain | **2 · Saltmarket**: the market district at dusk, pistol only |
+| ![Glasshouse: the Trust tower lobby](docs/screenshots/glasshouse.jpg) | ![Signal Hill: the landing stage below the sea fort in the storm](docs/screenshots/signalhill.jpg) |
+| **3 · Glasshouse**: the Trust tower, lockdown | **5 · Signal Hill**: the landing stage below the sea fort, storm |
+
+![Touch controls on a phone in landscape](docs/screenshots/mobile.jpg)
+
+*On a phone: floating move stick, drag to look, a fire button that also steers.*
 
 ## Run
 
@@ -8,8 +21,35 @@ Browser FPS (Three.js + TypeScript + Vite) with a six-mission story campaign, **
 npm install
 npm run assets   # downloads the free CC0 assets (~450 MB) into public/assets
 npm run sounds   # (re)generates the sound effects into public/assets/audio
+npm run voices   # (re)generates the enemy callout voices (macOS `say`; see scripts/make_voices.py)
 npm run dev      # http://localhost:5173
 ```
+
+## Developer options
+
+`F2` opens a developer panel (on a phone, the **DEV** button next to pause). It is on in the dev server,
+and in any build with `?dev=1` in the URL (remembered until `?dev=0`), so a deployed copy can be
+checked the same way:
+
+- start any chapter, skip the current objective, jump to it, restart the checkpoint, kill every bot
+- god mode, infinite ammo, frozen bots, time scale from 0.1× to 2×
+- a free-fly camera (mouse and WASD, Space/C for up and down, Shift for speed, Esc to stop)
+- hide the HUD, the AI debug overlay, switch graphics quality, save a screenshot
+- live stats: fps, frame time, draw calls and triangles for the whole frame, bots alive, positions
+
+## Deploy (Docker)
+
+The image builds the game and serves it with nginx. The first build stage downloads the CC0 assets
+itself, so a fresh clone is enough; that layer stays cached until `scripts/fetch-assets.py` changes.
+
+```bash
+docker compose up -d --build     # http://<server>:8080, health check at /health
+# or
+docker build -t breachpoint . && docker run -d -p 8080:80 --restart always breachpoint
+```
+
+On Dokploy: create an application from this repo with the **Dockerfile** build type and point the
+domain at container port **80** (Traefik handles TLS). No environment variables are needed.
 
 ## Story: Low Water
 
@@ -65,6 +105,11 @@ With the dev server running, the console has helpers for checking a mission with
 
 Switch with `1` `2` `3`, `Q` or the mouse wheel. `R` reloads (from empty the reload also
 sends the bolt or slide home), `F` inspects, `F3` shows the AI debug overlay.
+On phones and tablets (or with `?touch=1`) on-screen controls replace the keyboard and mouse
+(`src/ui/touch.ts`): a floating move stick on the left (push past the ring to sprint), drag to look
+on the right, a fire button that also steers, aim and crouch toggles, and "use" and "hold breath"
+buttons that show up when they apply. The first run on a touch device starts on Low quality.
+
 Firing an empty gun clicks and reloads; with no ammo left it switches to a gun that has some.
 
 `E` picks up what you are looking at: a fallen enemy's gun (you reach for it and bring it up in

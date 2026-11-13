@@ -8,6 +8,7 @@ import { EnemyManager, type Enemy } from '../enemies/enemies';
 import { TICK_DT, Btn, type HitZone, type PlayerCommand, type Vec3 } from '../net/protocol';
 import { Player } from '../player/player';
 import { Hud } from '../ui/hud';
+import { TouchControls, wantsTouchControls } from '../ui/touch';
 import { FpArms } from '../weapons/arms';
 import { WeaponController, type ShotRequest, type WeaponState } from '../weapons/controller';
 import { Viewmodel } from '../weapons/viewmodel';
@@ -20,6 +21,7 @@ import { initNavigation, NavSystem } from '../world/navmesh';
 import { lineOfSight, raycastBoxes } from '../world/physics';
 import { initPhysics, PhysicsWorld } from '../world/physics3d';
 import { LootManager, type InteractCandidate } from '../world/loot';
+import { Barks } from './barks';
 import { CommandBuilder } from './commands';
 import { EventBus } from './events';
 import { MissionMode, type MissionDef, type SavedCheckpoint } from './mission';
@@ -57,9 +59,17 @@ export class Game {
   private worldFlash = new THREE.PointLight(0xffb060, 0, 12, 2);
   readonly renderer: Renderer;
   readonly input: Input;
+  /** On-screen controls on phones and tablets (null with a mouse). */
+  private touch: TouchControls | null = null;
   readonly hud = new Hud();
   readonly events = new EventBus();
   audio!: Audio;
+  private barks: Barks | null = null;
+  /**
+   * Developer switches (src/ui/devpanel.ts). `onFrame` runs every rendered frame after the
+   * simulation, before the render: the panel's free camera and live stats hang off it.
+   */
+  readonly dev = { god: false, ammo: false, timeScale: 1, onFrame: null as ((dt: number) => void) | null };
   readonly player: Player;
   readonly enemies: EnemyManager;
   weapons!: WeaponController;
@@ -106,6 +116,11 @@ export class Game {
     this.preset = QUALITY_PRESETS[settings.quality];
     this.renderer = new Renderer(container, this.scene, this.camera, this.viewScene, this.viewCamera);
     this.input = new Input(this.renderer.domElement);
+    if (wantsTouchControls()) {
+      this.input.touchMode = true;
+      document.body.classList.add('touch');
+      this.touch = new TouchControls(this.input, () => this.input.unlock());
+    }
     this.player = new Player(this.camera);
     this.enemies = new EnemyManager(this.scene);
     this.effects = new Effects(this.scene, this.preset.decals);
@@ -133,6 +148,7 @@ export class Game {
 
   private setState(s: GameState): void {
     this.state = s;
+    this.touch?.show(s === 'playing');
     this.hud.show(s === 'playing' || s === 'dead' || s === 'complete');
     this.onStateChange?.(s);
   }
@@ -256,6 +272,10 @@ export class Game {
       this.audio?.hitMarker(head, e.killed);
       this.hud.hit(head, e.killed);
       if (e.killed) this.hud.killFeed(this.enemies.enemies.find((x) => x.id === e.target)?.label || CALLSIGNS[e.target % CALLSIGNS.length], head);
+      if (e.killed) {
+        const dead = this.enemies.enemies.find((x) => x.id === e.target);
+        if (dead) this.barks?.died(dead, this.enemies.enemies, this.camera.position);
+      }
     });
     ev.on('playerHurt', (e) => {
       const from = vec(e.from);
@@ -277,7 +297,10 @@ export class Game {
       // Close enough to hurt: ears shut for a moment
       this.audio?.concuss(1 - d / 14);
     });
-    ev.on('callout', (e) => this.debugCallout(e.shooter, e.kind));
+    ev.on('callout', (e) => {
+      this.debugCallout(e.shooter, e.kind);
+      this.barks?.callout(this.enemies.enemies.find((x) => x.id === e.shooter), e.kind, this.camera.position);
+    });
   }
 
   private wireWeaponEvents(): void {
@@ -335,7 +358,20 @@ export class Game {
   }
 
   ensureAudio(): void {
-    if (!this.audio) this.audio = new Audio(this.settings.volume);
+    if (!this.audio) {
+      this.audio = new Audio(this.settings.volume);
+      // Two rays (feet and head height of the source): a waist-high wall only half hides a gunshot
+      const up = new THREE.Vector3(0, 0.9, 0);
+      const hi = new THREE.Vector3();
+      this.audio.occlusion = (from, to) => {
+        if (from.distanceToSquared(to) < 4) return 0;
+        const cs = this.map.colliders;
+        const a = lineOfSight(from, to, cs) ? 0 : 0.5;
+        const b = lineOfSight(from, hi.copy(to).add(up), cs) ? 0 : 0.5;
+        return a + b;
+      };
+    }
+    this.barks ??= new Barks(this.audio);
     this.audio.resume();
   }
 
@@ -363,6 +399,7 @@ export class Game {
   start(modeId: ModeId, mission?: MissionDef, resume?: SavedCheckpoint | null): void {
     this.ensureAudio();
     this.failReason = null;
+    this.barks?.reset();
     this.enemies.clear();
     this.effects.clear();
     this.phys.clear();
@@ -378,7 +415,7 @@ export class Game {
       m.onCheckpoint = (cp) => this.onCheckpoint?.(cp);
       this.mode = m;
     } else this.mode = createMode(modeId);
-    this.weapons.infiniteAmmo = this.mode.infiniteAmmo;
+    this.weapons.infiniteAmmo = this.mode.infiniteAmmo || this.dev.ammo;
     this.mode.start(this);
     this.camera.fov = this.settings.fov;
     this.camera.updateProjectionMatrix();
@@ -535,7 +572,7 @@ export class Game {
   }
 
   private onPlayerHit(dmg: number, from: THREE.Vector3): void {
-    if (this.mode?.playerInvulnerable || !this.player.alive) return;
+    if (this.mode?.playerInvulnerable || this.dev.god || !this.player.alive) return;
     const killed = this.player.damage(dmg);
     this.events.emit({ type: 'playerHurt', target: this.player.id, from: v3(from), damage: dmg, killed });
     this.player.punchPitch += 0.02;
@@ -622,7 +659,7 @@ export class Game {
 
   private frame(): void {
     const now = performance.now();
-    const dt = this.fixedDt ?? Math.min(0.1, (now - this.lastTime) / 1000);
+    const dt = (this.fixedDt ?? Math.min(0.1, (now - this.lastTime) / 1000)) * this.dev.timeScale;
     this.lastTime = now;
     const playing = (this.state === 'playing' || this.state === 'dead' || this.state === 'complete') && !!this.mode;
 
@@ -654,7 +691,7 @@ export class Game {
       }
       this.camera.updateMatrixWorld();
       this.weapons.render(dt, alpha, this.input, this.player, this.camera, this.settings.fov);
-      this.enemies.render(dt, alpha);
+      this.enemies.render(dt, alpha, this.camera);
       this.phys.render();
       this.worldFlash.position.copy(this.camera.position);
 
@@ -671,12 +708,16 @@ export class Game {
       this.hud.setScope(this.weapons.scoped, this.weapons.breath / 4);
       this.hud.grenades(this.enemies.grenades.positions, this.camera, this.player.position);
       this.mode!.render?.(this);
-      this.hud.setInteractPrompt(!this.player.alive ? null : this.mode!.interactPrompt?.() ?? (this.activeInteract ? {
+      const prompt = !this.player.alive ? null : this.mode!.interactPrompt?.() ?? (this.activeInteract ? {
         key: this.activeInteract.promptKey,
         action: this.activeInteract.promptAction,
         detail: this.activeInteract.promptDetail,
-      } : null));
+      } : null);
+      this.hud.setInteractPrompt(prompt);
+      this.touch?.setContext({ interact: !!prompt, scoped: this.weapons.scoped });
       this.audio.updateListener(this.camera);
+      if (this.state === 'playing') this.barks?.update(dt);
+      this.probeSpace(dt);
       this.audio.setHealth(this.player.health / 100);
       if (this.weapons.aiming !== this.wasAiming) {
         this.wasAiming = this.weapons.aiming;
@@ -703,8 +744,43 @@ export class Game {
     this.effects.update(dt);
     this.map.update(dt, this.camera.position, this.mode ? this.audio : undefined);
     this.syncViewLighting();
+    this.dev.onFrame?.(dt);
     this.renderer.render(dt);
     this.input.endFrame();
+  }
+
+  private spaceT = 0;
+  private spaceEnclosed = 0;
+  private spaceSize = 30;
+
+  /**
+   * What kind of space the listener is in, for the reverb: a ray up (is there a roof) and eight
+   * around (how close are the walls, how many directions are shut). A few times a second.
+   */
+  private probeSpace(dt: number): void {
+    this.spaceT -= dt;
+    if (this.spaceT > 0) return;
+    this.spaceT = 0.2;
+    const cs = this.map.colliders;
+    const eye = this.camera.position;
+    const roof = raycastBoxes(eye, _up, 30, cs);
+    let shut = 0;
+    let sum = 0;
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      _probe.set(Math.sin(a), 0, Math.cos(a));
+      const h = raycastBoxes(eye, _probe, 40, cs);
+      const d = h ? h.distance : 40;
+      if (d < 25) shut++;
+      sum += d;
+    }
+    const underground = this.map.env.flashlight;
+    let enclosed = (roof ? 0.55 : 0) + 0.45 * (shut / 8);
+    if (underground) enclosed = Math.max(enclosed, 0.9);
+    // Glide so a doorway is a transition, not a switch
+    this.spaceEnclosed += (enclosed - this.spaceEnclosed) * 0.5;
+    this.spaceSize += (sum / 8 - this.spaceSize) * 0.5;
+    this.audio.setSpace(this.spaceEnclosed, this.spaceSize, underground);
   }
 
   /** Keep the weapon lit consistently with the world as the camera turns. */
@@ -757,3 +833,6 @@ export class Game {
     this.debugEl.innerHTML = html;
   }
 }
+
+const _up = new THREE.Vector3(0, 1, 0);
+const _probe = new THREE.Vector3();

@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.DS_Store
+*.part
+# Downloaded in the image's first stage (keeps the build context small and the same as a fresh clone)
+public/assets/textures
+public/assets/hdri
+public/assets/models/*
+!public/assets/models/m4
+!public/assets/models/g19
+!public/assets/models/ultima_ratio

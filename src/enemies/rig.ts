@@ -142,10 +142,10 @@ export class SoldierRig {
       if (m.isMesh) {
         m.castShadow = true;
         m.receiveShadow = true;
-        m.frustumCulled = false;
       }
       if ((o as THREE.Bone).isBone) this.allBones.push(o as THREE.Bone);
     });
+    this.fitCullSpheres();
     const get = (n: string): THREE.Bone => {
       const o = this.model.getObjectByName(`mixamorig${n}`);
       if (!o) throw new Error(`soldier rig: missing bone ${n}`);
@@ -185,6 +185,28 @@ export class SoldierRig {
     this.root.add(this.gunPivot);
   }
 
+  /**
+   * Skinned vertices end up wherever the bones put them, so the geometry's own bounds are
+   * meaningless for culling. Give every skinned mesh a fixed sphere around the body instead (in
+   * the mesh's space, measured with the rig at the origin): large enough for a crouch, a lean or a
+   * ragdoll lying next to its feet, small enough that bots behind you are skipped by both the camera
+   * and the shadow pass.
+   */
+  private fitCullSpheres(): void {
+    this.root.updateMatrixWorld(true);
+    const centre = new THREE.Vector3(0, 0.8, 0);
+    const radius = 2.1;
+    const ws = new THREE.Vector3();
+    this.model.traverse((o) => {
+      const m = o as THREE.SkinnedMesh;
+      if (!m.isSkinnedMesh) return;
+      m.getWorldScale(ws);
+      const s = Math.max(1e-6, (Math.abs(ws.x) + Math.abs(ws.y) + Math.abs(ws.z)) / 3);
+      m.boundingSphere = new THREE.Sphere(m.worldToLocal(centre.clone()), radius / s);
+      m.frustumCulled = true;
+    });
+  }
+
   play(name: 'Idle' | 'Walk' | 'Run', speed = 1): void {
     const next = this.actions[name];
     if (!next) return;
@@ -205,6 +227,8 @@ export class SoldierRig {
     const s = zone === 'head' ? 1.4 : zone === 'leg' ? 0.5 : zone === 'arm' ? 0.6 : 1;
     this.flinchVel.addScaledVector(dir, 6 * strength * s);
     this.staggerVel.addScaledVector(dir.clone().setY(0), 1.6 * strength * s);
+    if (zone === 'leg') this.dip = Math.min(1, this.dip + 0.7 * strength);
+    if (zone === 'arm') this.armDrop = Math.min(1, this.armDrop + 0.8 * strength);
   }
 
   get headWorld(): THREE.Vector3 {
@@ -232,10 +256,40 @@ export class SoldierRig {
     return best;
   }
 
+  /**
+   * Killed. A head shot drops the body at once; anything else plays a moment of dying first (the
+   * hit lands, the knees give, the gun sags) and the ragdoll takes over from that motion, so a
+   * body crumples instead of being switched off.
+   */
   die(bulletDir: THREE.Vector3, zone: HitZone, point: THREE.Vector3 | null, force: number): void {
+    if (this.dead || this.dying) return;
+    if (zone === 'head' || !this.phys) {
+      this.startRagdoll(bulletDir, zone, point, force);
+      return;
+    }
+    const dur = zone === 'leg' ? 0.32 + Math.random() * 0.14 : 0.18 + Math.random() * 0.17;
+    this.dying = { t: 0, dur, dir: bulletDir.clone(), zone, point: point?.clone() ?? null, force };
+    this.crouchTarget = zone === 'leg' ? 1 : 0.75;
+    this.aimTarget = 0;
+    this.leanTarget = 0;
+    this.lookWeight = 0;
+    this.reload = -1;
+    this.throwT = -1;
+    this.hit(bulletDir, 1.8, zone);
+  }
+
+  /** Between the killing shot and the ragdoll (see die). */
+  private dying: { t: number; dur: number; dir: THREE.Vector3; zone: HitZone; point: THREE.Vector3 | null; force: number } | null = null;
+
+  /** Brief reactions to a non-lethal hit: a leg wound dips the knees, an arm wound drops the gun. */
+  private dip = 0;
+  private armDrop = 0;
+
+  private startRagdoll(bulletDir: THREE.Vector3, zone: HitZone, point: THREE.Vector3 | null, force: number): void {
     if (this.dead) return;
     this.dead = true;
-    this.mixer.stopAllAction();
+    // No mixer.stopAllAction() here: stopping restores every bone to its bind pose, and the ragdoll
+    // must start from the pose the body is in. The mixer simply isn't updated once dead.
     // Bring the gun into the world: it falls on its own
     this.scene.attach(this.gunPivot);
     if (this.phys) {
@@ -274,6 +328,21 @@ export class SoldierRig {
       this.ragdoll?.update(dt);
       return;
     }
+    if (this.dying) {
+      const d = this.dying;
+      d.t += dt;
+      // Whatever way he was moving, he stops moving under his own power
+      this.velocity.multiplyScalar(Math.exp(-5 * dt));
+      if (d.t >= d.dur) {
+        this.dying = null;
+        // Part of the bullet's push is already in the stagger and the bone velocities
+        this.startRagdoll(d.dir, d.zone, d.point, d.force * 0.75);
+        this.ragdoll?.update(dt);
+        return;
+      }
+    }
+    this.dip = Math.max(0, this.dip - dt * 2.2);
+    this.armDrop = Math.max(0, this.armDrop - dt * 1.6);
     // --- Locomotion: which clip, which way the legs go
     const fwd0 = new THREE.Vector3(0, 0, 1).applyQuaternion(this.root.quaternion);
     const speed = Math.hypot(this.velocity.x, this.velocity.z);
@@ -327,7 +396,7 @@ export class SoldierRig {
     }
 
     // --- Crouch with planted feet (works while walking: feet follow the clip, knees bend)
-    this.crouch = THREE.MathUtils.damp(this.crouch, this.crouchTarget, 8, dt);
+    this.crouch = THREE.MathUtils.damp(this.crouch, Math.min(1, this.crouchTarget + this.dip * 0.45), this.dying ? 11 : 8, dt);
     if (this.crouch > 0.01) {
       const lf = worldPos(b.lFoot);
       const rf = worldPos(b.rFoot);
@@ -355,7 +424,7 @@ export class SoldierRig {
     }
 
     // --- Torso: pitch toward the aim point, flinch spring
-    this.aim = THREE.MathUtils.damp(this.aim, this.reload >= 0 ? 0 : this.aimTarget, 7, dt);
+    this.aim = THREE.MathUtils.damp(this.aim, this.reload >= 0 ? 0 : this.aimTarget * (1 - this.armDrop * 0.8), this.dying ? 12 : 7, dt);
     const chest = worldPos(b.spine2);
     const toAim = new THREE.Vector3().subVectors(this.aimPoint, chest);
     const pitch = Math.atan2(toAim.y, Math.hypot(toAim.x, toAim.z)) * this.aim;

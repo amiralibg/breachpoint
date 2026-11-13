@@ -139,6 +139,8 @@ export class Enemy {
   leash = 7;
   /** Mission tag (spawn group name). */
   group = '';
+  /** Voice bank for callouts ('' = silent). */
+  voice = '';
   /** Friendly NPCs can't be hurt, never shoot, and follow the player when `follow` is set. */
   friendly = false;
   follow = false;
@@ -198,7 +200,12 @@ export class Enemy {
 
   /** Returns true if this killed the enemy. */
   damage(amount: number, dir: THREE.Vector3, from: THREE.Vector3, zone: HitZone, point: THREE.Vector3, ctx: Pick<EnemyCtx, 'squad' | 'events'>): boolean {
-    if (this.dead || this.friendly) return false;
+    if (this.friendly) return false;
+    if (this.dead) {
+      // Still falling (see SoldierRig.die): a follow-up shot jolts the body
+      this.rig.hit(dir, 0.9, zone);
+      return false;
+    }
     this.health -= amount;
     // Getting shot reveals roughly where the shooter is and wakes the bot up immediately.
     this.known.copy(from);
@@ -669,6 +676,7 @@ export class Enemy {
           && (e.state === 'moveCover' || e.state === 'flank' || e.state === 'push') && e.position.distanceTo(this.position) < 30);
         if ((this.sinceKnown < 4 || mateMoving) && this.canSuppress(ctx, threat)) {
           this.setState('suppress');
+          if (mateMoving) ctx.events.emit({ type: 'callout', shooter: this.id, kind: 'suppressing', at: v3(threat) });
           return;
         }
         // A marksman keeps his position; everyone else works forward
@@ -1051,7 +1059,16 @@ export class Enemy {
   // =============================================================================================
   // Rendering
 
-  render(dt: number, alpha: number): void {
+  /** Animation time not yet applied (distant and off-screen bots are animated at a lower rate). */
+  private animAcc = 0;
+  private animFrame = Math.floor(Math.random() * 8);
+
+  /**
+   * `every`: animate on one frame in this many, with the time that built up in between. Near bots
+   * run every frame; far or unseen ones still move (their root is placed every frame) but the
+   * mixer, IK and procedural layers skip frames.
+   */
+  render(dt: number, alpha: number, every = 1): void {
     if (!this.dead) {
       this.rig.root.position.lerpVectors(this.prevPos, this.position, alpha);
       let diff = this.facing - this.renderFacing;
@@ -1059,7 +1076,10 @@ export class Enemy {
       this.renderFacing += diff * Math.min(1, dt * 20);
       this.rig.root.rotation.y = this.renderFacing;
     }
-    this.rig.update(dt);
+    this.animAcc += dt;
+    if (++this.animFrame % every !== 0 && this.animAcc < 0.25) return;
+    this.rig.update(Math.min(this.animAcc, 0.25));
+    this.animAcc = 0;
   }
 
   dispose(scene: THREE.Scene): void {
@@ -1069,6 +1089,9 @@ export class Enemy {
 }
 
 const _feet = new THREE.Vector3();
+const _frustum = new THREE.Frustum();
+const _projView = new THREE.Matrix4();
+const _cull = new THREE.Sphere(new THREE.Vector3(), 1.6);
 const _down = new THREE.Vector3(0, -1, 0);
 
 function gauss(): number {
@@ -1202,6 +1225,8 @@ export interface SpawnOpts {
   label?: string;
   scale?: number;
   facing?: number;
+  /** Whose voice the bot barks in (the voice lines' faction); none for allies. */
+  voice?: string;
 }
 
 export class EnemyManager {
@@ -1285,6 +1310,7 @@ export class EnemyManager {
     e.home = opts.home ?? null;
     if (opts.leash !== undefined) e.leash = opts.leash;
     e.group = opts.group ?? '';
+    e.voice = opts.voice ?? (opts.friendly ? '' : 'lowwater');
     e.friendly = !!opts.friendly;
     e.label = opts.label ?? '';
     if (opts.facing !== undefined) e.setFacing(opts.facing);
@@ -1338,7 +1364,11 @@ export class EnemyManager {
     }
   }
 
+  /** Developer switch: bots stand still and think nothing (they still animate and can be shot). */
+  frozen = false;
+
   tick(dt: number, ctx: Omit<EnemyCtx, 'enemies' | 'squad' | 'grenades'>): void {
+    if (this.frozen) return;
     this.squad.update(dt);
     const full: EnemyCtx = { ...ctx, enemies: this.enemies, squad: this.squad, grenades: this.grenades };
     for (const e of this.enemies) {
@@ -1369,8 +1399,24 @@ export class EnemyManager {
     this.onEnemyDeath?.(e, e.weaponDef, e.weaponDef.magSize);
   }
 
-  render(dt: number, alpha: number): void {
-    for (const e of this.enemies) e.render(dt, alpha);
+  render(dt: number, alpha: number, camera?: THREE.Camera): void {
+    if (camera) {
+      _projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      _frustum.setFromProjectionMatrix(_projView);
+    }
+    for (const e of this.enemies) {
+      let every = 1;
+      if (camera) {
+        _cull.center.copy(e.rig.root.position).y += 0.9;
+        const d = _cull.center.distanceTo(camera.position);
+        // A zoomed scope makes distant bots big on screen: judge distance by apparent size
+        const zoom = (camera as THREE.PerspectiveCamera).isPerspectiveCamera ? 70 / Math.max(5, (camera as THREE.PerspectiveCamera).fov) : 1;
+        const seen = _frustum.intersectsSphere(_cull);
+        const apparent = d / zoom;
+        every = !seen ? (d < 12 ? 2 : 6) : e.dead ? 1 : apparent > 55 ? 3 : apparent > 28 ? 2 : 1;
+      }
+      e.render(dt, alpha, every);
+    }
     this.grenades.render();
   }
 

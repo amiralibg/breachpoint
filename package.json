@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "assets": "python3 scripts/fetch-assets.py",
-    "sounds": "python3 scripts/make_sounds.py"
+    "sounds": "python3 scripts/make_sounds.py",
+    "voices": "python3 scripts/make_voices.py"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",

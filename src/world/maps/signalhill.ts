@@ -193,8 +193,10 @@ export async function buildSignalHill(scene: THREE.Scene, q: QualityPreset, gl: 
   b.lamp(0, R - 0.4, -10, { color: 0xffb469, power: 30, range: 12, size: 0.3, flicker: 0.05 });
   b.lamp(-9, Y + 1.2, -35.5, { color: 0xdfe8ff, power: 110, range: 30, size: 0.35 });
   b.lamp(11, Y + 1.2, -35.5, { color: 0xdfe8ff, power: 110, range: 30, size: 0.35 });
-  b.lamp(0, B + 2.4, 31, { color: 0xffb469, power: 40, range: 16, size: 0.3 });
-  b.column(0.9, 30.4, B, B + 2.4, 0.12, steel);
+  // The jetty lamp hangs off an arm from its post, out over the planks
+  b.column(0.9, 30.4, B, B + 2.55, 0.12, steel);
+  b.box([0.25, B + 2.47, 30.36], [0.9, B + 2.53, 30.44], steel, { collide: false });
+  b.lamp(0.3, B + 2.47, 30.4, { color: 0xffb469, power: 22, range: 14, size: 0.3 });
   b.lamp(-20, R - 1.3, 8.6, { color: 0xffb469, power: 45, range: 16, size: 0.3 });
   b.lamp(11.5, 4.5, 12, { color: 0xff7a48, power: 20, range: 12, size: 0.25, flicker: 0.1 });
   b.lamp(19.5, Y + 3.6, -13.6, { color: 0xffb469, power: 45, range: 18, size: 0.3 });
@@ -526,16 +528,61 @@ function dress(d: Dresser, bounds: THREE.Box3): void {
   }
   jerry(-1.55, B, 32.2, 0.2);
   jerry(-1.5, B, 32.6, -0.1);
-  prop('life_jacket', 0.9, B + 0.65, 30.56, 0);
+  prop('life_jacket', 1.0, B + 0.25, 30.56, 0); // hung low on the lamp post, out of the glare
   postSign(-3.6, B, 29.4, '+z', 'FORT MARDELL', { lines: ['FORT MARDELL', 'LANDING STAGE', 'NO UNAUTHORISED MOORING'], h: 0.66, bg: '#1f3a5a', fg: '#f0ece0', border: '#f0ece0' });
-  // The boat: gunwale, cabin windows, nav lights, the outboard
-  deco([2.15, 1.5, 32.95], [4.65, 1.6, 39.55], C.white, 0.5);
-  for (const z of [36.95, 37.7]) deco([2.55, 1.9, z], [4.25, 2.25, z + 0.5], C.rack, 0.15, 0.3);
-  deco([2.9, 1.9, 38.62], [3.9, 2.25, 38.66], C.rack, 0.15, 0.3);
+  // The boat: a workboat hull with a pointed bow (toward -z), dark topsides under a white sheer
+  // stripe, a wooden deck, a wheelhouse aft, nav lights and the outboard
+  {
+    const x0 = 2.15, x1 = 4.65, bowZ = 32.95, sternZ = 39.55, cx = (x0 + x1) / 2;
+    // Plan outline (x, z), clockwise from the stern; `inset` narrows it for the lower hull and deck
+    const outline = (inset: number, bowIn: number): THREE.Shape => {
+      const s = new THREE.Shape();
+      const a = x0 + inset, c = x1 - inset, bz = bowZ + bowIn, shoulder = bowZ + 2.6;
+      // Shape y is -z, so the extrusion turned upright (rotateX(-90°)) lands at +z where it should
+      s.moveTo(a, -sternZ);
+      s.lineTo(c, -sternZ);
+      s.lineTo(c, -shoulder);
+      s.quadraticCurveTo(c, -(bz + 0.5), cx, -bz);
+      s.quadraticCurveTo(a, -(bz + 0.5), a, -shoulder);
+      s.lineTo(a, -sternZ);
+      return s;
+    };
+    const slabOf = (shape: THREE.Shape, y0: number, y1: number, color: number | THREE.Material): void => {
+      const g = new THREE.ExtrudeGeometry(shape, { depth: y1 - y0, bevelEnabled: false, curveSegments: 10 });
+      g.rotateX(-Math.PI / 2);
+      g.translate(0, y0, 0);
+      b.geo(g, typeof color === 'number' ? paint(color) : color);
+    };
+    const topsides = b.flat(0x1f2a33, 0.55);
+    slabOf(outline(0.3, 0.55), 0.3, 0.95, topsides); // the turn of the bilge, mostly under water
+    slabOf(outline(0.12, 0.2), 0.95, 1.22, topsides);
+    slabOf(outline(0, 0), 1.22, 1.42, topsides);
+    slabOf(outline(-0.015, -0.015), 1.42, 1.5, C.white); // sheer stripe
+    slabOf(outline(-0.04, -0.04), 1.5, 1.56, C.woodDark); // rubbing strake
+    slabOf(outline(0.08, 0.12), 1.56, 1.57, b.flat(0x5a4a38, 0.9)); // deck
+    // Wheelhouse aft: white box, dark glass on three sides, a roof that overhangs
+    const wx0 = 2.55, wx1 = 4.25, wz0 = 36.7, wz1 = 38.9;
+    deco([wx0, 1.57, wz0], [wx1, 2.4, wz1], C.white, 0.5);
+    deco([wx0 - 0.08, 2.4, wz0 - 0.12], [wx1 + 0.08, 2.47, wz1 + 0.05], C.white, 0.5);
+    const glass = b.flat(0x0b1014, 0.08, 0.3);
+    deco([wx0 + 0.15, 1.95, wz0 - 0.012], [wx1 - 0.15, 2.3, wz0 + 0.01], glass); // windscreen
+    for (const [x, d] of [[wx0, -1], [wx1, 1]] as const) {
+      for (const z of [wz0 + 0.25, wz0 + 1.2]) deco([x, 1.95, z], [x + d * 0.012, 2.3, z + 0.75], glass);
+    }
+    deco([3.1, 1.57, wz1], [3.7, 2.25, wz1 + 0.01], b.flat(0x1a2026, 0.6)); // the cabin door, aft
+    // Bow: a fairlead, a cleat and a short rail on each side
+    deco([cx - 0.06, 1.57, bowZ + 0.35], [cx + 0.06, 1.66, bowZ + 0.55], C.iron, 0.6, 0.5);
+    for (const x of [x0 + 0.12, x1 - 0.12]) {
+      d.cyl([x, 1.57, 34.2], 0.018, 0.4, paint(C.steel, 0.4, 0.8), 6);
+      d.cyl([x, 1.57, 35.6], 0.018, 0.4, paint(C.steel, 0.4, 0.8), 6);
+      deco([x - 0.015, 1.95, 34.2], [x + 0.015, 1.98, 35.6], C.steel, 0.4, 0.8);
+    }
+  }
   d.cyl([3.4, 2.5, 37.5], 0.03, 1.4, paint(C.iron, 0.6, 0.5), 6);
   b.box([3.35, 3.9, 37.45], [3.45, 4.0, 37.55], lens, { collide: false });
-  b.box([2.15, 1.62, 33.4], [2.25, 1.7, 33.5], b.glow(0xff3a2a, 3), { collide: false });
-  b.box([4.55, 1.62, 33.4], [4.65, 1.7, 33.5], b.glow(0x3aff6a, 3), { collide: false });
+  // Port red, starboard green, on the wheelhouse's front corners (bow toward -z: port is +x)
+  b.box([4.25, 2.18, 36.62], [4.33, 2.26, 36.7], b.glow(0xff3a2a, 3), { collide: false });
+  b.box([2.47, 2.18, 36.62], [2.55, 2.26, 36.7], b.glow(0x3aff6a, 3), { collide: false });
   deco([3.1, 1.2, 39.5], [3.7, 2.0, 39.95], C.rack, 0.5, 0.3);
   prop('ocean_buoy', -7, -0.4, 37, 0, 1, [0.08, 0.05]);
   prop('ocean_buoy', 10, -0.45, 42, 0, 1, [-0.06, 0.1]);

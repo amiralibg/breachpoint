@@ -40,8 +40,8 @@ export class CommandBuilder {
       tick,
       buttons,
       pressed,
-      moveX: (input.down('KeyD') ? 1 : 0) - (input.down('KeyA') ? 1 : 0),
-      moveZ: (input.down('KeyW') ? 1 : 0) - (input.down('KeyS') ? 1 : 0),
+      moveX: clamp1((input.down('KeyD') ? 1 : 0) - (input.down('KeyA') ? 1 : 0) + input.stickX),
+      moveZ: clamp1((input.down('KeyW') ? 1 : 0) - (input.down('KeyS') ? 1 : 0) + input.stickY),
       yaw,
       pitch,
       weapon: this.weapon,
@@ -51,4 +51,8 @@ export class CommandBuilder {
     this.wheel = 0;
     return cmd;
   }
+}
+
+function clamp1(v: number): number {
+  return Math.max(-1, Math.min(1, v));
 }

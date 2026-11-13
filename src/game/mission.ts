@@ -217,7 +217,7 @@ export class MissionMode implements GameMode {
       const at = new THREE.Vector3(...u.at);
       const e = this.game.enemies.spawn(at, stats, undefined, {
         role: u.role ?? 'rifleman', models: MODELS[g.faction], home: opts.alert ? undefined : at.clone(), leash: u.leash ?? 4,
-        group, label: u.heavy ? `${NAMES[g.faction]} heavy` : NAMES[g.faction], scale: u.heavy ? 1.09 : 1, facing: u.face,
+        group, voice: g.faction, label: u.heavy ? `${NAMES[g.faction]} heavy` : NAMES[g.faction], scale: u.heavy ? 1.09 : 1, facing: u.face,
       });
       if (opts.alert) e.alert(this.game.player.position);
       out.push(e);
@@ -573,6 +573,45 @@ export class MissionMode implements GameMode {
       this.enterStage(false);
       this.saveCheckpoint();
     }
+  }
+
+  /**
+   * Developer: finish the current objective as if the player had done it (each task's onDone
+   * runs, so flags, doors and water move the way the story expects), then go to the next one.
+   */
+  devSkipStage(): void {
+    if (this.complete || this.failed) return;
+    for (const t of this.stage.tasks) {
+      const st = this.tasks.get(t.id);
+      if (!st || st.done || t.optional) continue;
+      st.done = true;
+      st.progress = 1;
+      t.onDone?.(this);
+    }
+    if (this.stageIndex >= this.def.stages.length - 1) {
+      this.complete = true;
+      this.stopClock();
+      this.endT = 2.5;
+      return;
+    }
+    this.stageIndex++;
+    this.enterStage(false);
+    this.saveCheckpoint();
+  }
+
+  /** Developer: where the current objective is (the first unfinished task with a place). */
+  devObjective(): THREE.Vector3 | null {
+    for (const t of this.stage.tasks) {
+      const st = this.tasks.get(t.id);
+      const at = (t as { at?: V3 }).at;
+      if (st && !st.done && at) return new THREE.Vector3(...at);
+    }
+    return null;
+  }
+
+  /** Developer: chapter progress for the panel. */
+  devStatus(): { stage: number; stages: number; id: string } {
+    return { stage: this.stageIndex, stages: this.def.stages.length, id: this.stage.id };
   }
 
   onKill(_game: Game, _headshot: boolean): void {

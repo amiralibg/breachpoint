@@ -129,10 +129,16 @@ const DEFAULTS: Settings = {
   showFps: true,
 };
 
+/** First run on a phone or tablet: start on Low (the player can raise it in Settings). */
+function firstRunDefaults(): Settings {
+  const touch = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches && navigator.maxTouchPoints > 0;
+  return touch ? { ...DEFAULTS, quality: 'low', showFps: false } : { ...DEFAULTS };
+}
+
 export function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(KEY);
-    if (!raw) return { ...DEFAULTS };
+    if (!raw) return firstRunDefaults();
     return { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Settings>) };
   } catch {
     return { ...DEFAULTS };

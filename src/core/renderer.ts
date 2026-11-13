@@ -68,6 +68,17 @@ class ScenePass extends Pass {
   }
 }
 
+/**
+ * Ambient occlusion at half resolution. It was the single most expensive pass at full size, and
+ * occlusion is soft enough that a quarter of the pixels (bilinearly upsampled in the blend) looks
+ * the same in play.
+ */
+class HalfResGTAOPass extends GTAOPass {
+  override setSize(width: number, height: number): void {
+    super.setSize(Math.max(1, Math.round(width / 2)), Math.max(1, Math.round(height / 2)));
+  }
+}
+
 /** The first-person scene, over whatever is in the buffer, with depth cleared first. */
 class ViewPass extends Pass {
   constructor(private scene: THREE.Scene, private camera: THREE.Camera) {
@@ -298,7 +309,7 @@ export class Renderer {
     if (p.ambientOcclusion) {
       const size = this.gl.getDrawingBufferSize(new THREE.Vector2());
       // Reads the world pass's depth and rebuilds normals from it: no second render of the scene
-      const ao = new GTAOPass(this.scene, this.camera, size.x, size.y, { depthTexture: depth });
+      const ao = new HalfResGTAOPass(this.scene, this.camera, size.x, size.y, { depthTexture: depth });
       ao.blendIntensity = 0.9;
       ao.updateGtaoMaterial({ radius: 0.7, distanceExponent: 1.5, thickness: 1.5, samples: 12 });
       composer.addPass(ao);

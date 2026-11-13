@@ -102,8 +102,15 @@ export class Audio {
   private listenerPos = new THREE.Vector3();
   private samples = new Map<string, AudioBuffer>();
   private lastVariant = new Map<string, number>();
-  private reverb: ConvolverNode;
+  private reverb: Record<'open' | 'room' | 'hall', { conv: ConvolverNode; gain: GainNode }>;
+  /** Whether the hall impulse is currently the tunnel one. */
+  private hallIsTunnel = false;
   private wetBus: GainNode;
+  /**
+   * Is the straight line from the listener to a sound blocked? 0 = clear, 1 = behind a wall.
+   * Set by the game (it owns the colliders); without it nothing is occluded.
+   */
+  occlusion: ((listener: THREE.Vector3, source: THREE.Vector3) => number) | null = null;
   /** Where the muffle rests (set by health), what it was last sent to, and when a concussion ends. */
   private restCut = OPEN;
   private appliedCut = OPEN;
@@ -131,11 +138,19 @@ export class Audio {
     this.muffle.Q.value = 0.5;
     this.muffle.frequency.value = OPEN;
     this.bus.connect(this.muffle).connect(this.master);
-    this.reverb = this.ctx.createConvolver();
-    this.reverb.buffer = this.impulse(1.8);
+    // Three spaces, crossfaded by where the listener stands (setSpace): open air with slap-back
+    // off distant walls, a room, and a big hard space (atrium, tunnel, station hall)
     this.wetBus = this.ctx.createGain();
     this.wetBus.gain.value = 0.9;
-    this.wetBus.connect(this.reverb).connect(this.bus);
+    const space = (ir: AudioBuffer, gain: number): { conv: ConvolverNode; gain: GainNode } => {
+      const conv = this.ctx.createConvolver();
+      conv.buffer = ir;
+      const g = this.ctx.createGain();
+      g.gain.value = gain;
+      this.wetBus.connect(conv).connect(g).connect(this.bus);
+      return { conv, gain: g };
+    };
+    this.reverb = { open: space(this.impulse(1.8), 1), room: space(this.roomImpulse(0.9, 0), 0), hall: space(this.roomImpulse(2.6, 0), 0) };
 
     const len = this.ctx.sampleRate * 1.5;
     this.noise = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
@@ -169,6 +184,52 @@ export class Audio {
       this.lastVariant.set(name, i);
       file = `${name}_${i}`;
     }
+    return this.playFile(file, (opts.gain ?? 1) * (MIX[name] ?? 1), opts);
+  }
+
+  // --- Voices: callout lines per faction and speaker (scripts/make_voices.py, or recordings)
+
+  /** faction -> speakers -> kind -> file names. Null until the manifest has loaded. */
+  private voiceBank: Record<string, Record<string, string[]>[]> | null = null;
+  private lastLine = new Map<string, string>();
+
+  /** Fetch the voice manifest and lines (in the background; barks are skipped until they arrive). */
+  loadVoices(): void {
+    if (this.voiceBank) return;
+    this.voiceBank = {};
+    const base = `${import.meta.env.BASE_URL}assets/audio/voice/`;
+    void fetch(`${base}manifest.json`).then((r) => (r.ok ? r.json() : {})).then((bank: Record<string, Record<string, string[]>[]>) => {
+      this.voiceBank = bank;
+      const files = new Set(Object.values(bank).flatMap((sp) => sp.flatMap((k) => Object.values(k).flat())));
+      for (const f of files) {
+        void fetch(`${base}${f}.wav`).then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(f))))
+          .then((b) => this.ctx.decodeAudioData(b)).then((b) => this.samples.set(f, b)).catch(() => {});
+      }
+    }).catch(() => {});
+  }
+
+  /** Number of speakers recorded for a faction (0 = no voice). */
+  speakers(faction: string): number {
+    return this.voiceBank?.[faction]?.length ?? 0;
+  }
+
+  /**
+   * One callout line from `speaker` of `faction`, at a position. Returns its length in seconds
+   * (0 if there is no such line loaded), so the caller can keep voices from talking over each other.
+   */
+  voice(faction: string, speaker: number, kind: string, opts: PlayOptions): number {
+    const lines = this.voiceBank?.[faction]?.[speaker]?.[kind]?.filter((f) => this.samples.has(f));
+    if (!lines?.length) return 0;
+    const key = `${faction}/${speaker}/${kind}`;
+    let pick = lines[Math.floor(Math.random() * lines.length)];
+    if (pick === this.lastLine.get(key) && lines.length > 1) pick = lines[(lines.indexOf(pick) + 1) % lines.length];
+    this.lastLine.set(key, pick);
+    const rate = opts.rate ?? 1;
+    if (!this.playFile(pick, opts.gain ?? 1, { jitter: 0.02, ...opts })) return 0;
+    return this.samples.get(pick)!.duration / rate;
+  }
+
+  private playFile(file: string, gain: number, opts: PlayOptions): boolean {
     const buf = this.samples.get(file);
     if (!buf) return false;
     const t = this.ctx.currentTime + (opts.delay ?? 0);
@@ -177,7 +238,7 @@ export class Audio {
     const jitter = opts.jitter ?? 0.04;
     src.playbackRate.value = (opts.rate ?? 1) * (1 + (Math.random() * 2 - 1) * jitter);
     const g = this.ctx.createGain();
-    g.gain.value = (opts.gain ?? 1) * (MIX[name] ?? 1);
+    g.gain.value = gain;
     let node: AudioNode = src.connect(g);
     if (opts.pos) {
       const d = opts.pos.distanceTo(this.listenerPos);
@@ -272,6 +333,69 @@ export class Audio {
   }
 
   /**
+   * Where the listener is, as reverb: `enclosed` 0 (open sky) .. 1 (roof and walls all round),
+   * `size` the typical distance to the walls in metres, `tunnel` for the long hard spaces
+   * underground (flutter between close parallel walls). Call a few times a second; it glides.
+   */
+  setSpace(enclosed: number, size: number, tunnel: boolean): void {
+    const t = this.ctx.currentTime;
+    const big = THREE.MathUtils.smoothstep(size, 7, 22);
+    this.reverb.open.gain.gain.setTargetAtTime(1 - enclosed * 0.85, t, 0.35);
+    this.reverb.room.gain.gain.setTargetAtTime(enclosed * (1 - big) * 1.1, t, 0.35);
+    this.reverb.hall.gain.gain.setTargetAtTime(enclosed * Math.max(big, tunnel ? 0.6 : 0), t, 0.35);
+    // Indoors everything is wetter: the walls are close and hard
+    this.wetBus.gain.setTargetAtTime(0.9 + enclosed * 0.35, t, 0.35);
+    // Underground the big space is a tunnel (flutter between close walls): swap the impulse
+    // once when the character of the place changes, not every call
+    if (tunnel !== this.hallIsTunnel) {
+      this.hallIsTunnel = tunnel;
+      this.reverb.hall.conv.buffer = this.roomImpulse(tunnel ? 3.2 : 2.6, tunnel ? 1 : 0);
+    }
+  }
+
+  /**
+   * A room: dense early reflections (5-40 ms) into an exponential tail whose highs die first.
+   * `flutter` adds the evenly spaced slap of two close parallel walls (a tunnel or a corridor).
+   */
+  private roomImpulse(seconds: number, flutter: number): AudioBuffer {
+    const sr = this.ctx.sampleRate;
+    const len = Math.floor(sr * seconds);
+    const buf = this.ctx.createBuffer(2, len, sr);
+    const decay = 6.9 / seconds; // -60 dB at `seconds`
+    for (let c = 0; c < 2; c++) {
+      const d = buf.getChannelData(c);
+      for (let i = 0; i < len; i++) {
+        const t = i / sr;
+        d[i] = (Math.random() * 2 - 1) * Math.exp(-t * decay) * 0.16 * Math.min(1, t / 0.012);
+      }
+      // Early reflections: a cluster of discrete taps off the nearest surfaces
+      for (let k = 0; k < 14; k++) {
+        const at = 0.005 + Math.random() * 0.035;
+        const j = Math.floor(at * sr);
+        if (j < len) d[j] += (Math.random() < 0.5 ? -1 : 1) * (0.5 - at * 6) * (0.6 + Math.random() * 0.4);
+      }
+      if (flutter > 0) {
+        // Parallel walls ~7 m apart: a slap every ~41 ms, slowly smearing out
+        const period = 0.041 * (c ? 1.03 : 1);
+        for (let n = 1; n * period < seconds * 0.6; n++) {
+          const j = Math.floor(n * period * sr);
+          const g = 0.35 * Math.exp(-n * period * decay * 0.9);
+          const w = 20 + n * 6;
+          for (let k = 0; k < w && j + k < len; k++) d[j + k] += (Math.random() * 2 - 1) * g * (1 - k / w);
+        }
+      }
+      // Highs fade faster than lows
+      let y = 0;
+      for (let i = 0; i < len; i++) {
+        const a = 0.55 - 0.45 * Math.min(1, i / (sr * seconds * 0.5));
+        y += a * (d[i] - y);
+        d[i] = y;
+      }
+    }
+    return buf;
+  }
+
+  /**
    * Stereo impulse response of the compound: discrete echoes off the walls (the yard is 80 m
    * across, so round trips of 20-250 m), each one later, quieter, duller and more smeared, over
    * a faint diffuse tail. Left and right get their own echo times so the slap-back has width.
@@ -313,15 +437,28 @@ export class Audio {
     // The send is taken before the panner, so fade it with distance too, only more slowly:
     // far sounds get wetter, not louder than near ones
     if (pos) send *= falloff(pos.distanceTo(this.listenerPos), ref, rolloff) ** 0.6;
+    // Behind a wall: quieter and dull, and heard more through the room than directly
+    const occ = pos && this.occlusion ? this.occlusion(this.listenerPos, pos) : 0;
+    if (occ > 0) send *= 1 + occ;
     const dry = pos ? this.panner(pos, ref, rolloff, o.pan ?? 'HRTF') : this.bus;
-    if (send <= 0) return dry;
-    // Split to the dry path and the reverb send
-    const split = this.ctx.createGain();
-    const s = this.ctx.createGain();
-    s.gain.value = send;
-    split.connect(s).connect(this.wetBus);
-    split.connect(dry);
-    return split;
+    let entry: AudioNode = dry;
+    if (send > 0) {
+      // Split to the dry path and the reverb send
+      const split = this.ctx.createGain();
+      const s = this.ctx.createGain();
+      s.gain.value = send;
+      split.connect(s).connect(this.wetBus);
+      split.connect(dry);
+      entry = split;
+    }
+    if (occ <= 0) return entry;
+    const lp = this.ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = THREE.MathUtils.lerp(9000, 900, occ);
+    const g = this.ctx.createGain();
+    g.gain.value = 1 - 0.5 * occ;
+    lp.connect(g).connect(entry);
+    return lp;
   }
 
   private panner(pos: THREE.Vector3, ref: number, rolloff: number, model: PanningModelType): AudioNode {

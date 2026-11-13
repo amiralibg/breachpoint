@@ -296,3 +296,110 @@ kbd { font-family: var(--font); background: #22252a; border: 1px solid #3a3d42; 
 .brief-resume span { color: var(--accent); font-size: 11px; letter-spacing: .26em; text-transform: uppercase; }
 .brief-resume b { font-size: 15px; letter-spacing: .06em; }
 .brief-resume small { color: var(--muted); font-size: 12px; }
+
+/* ---------- Touch controls (phones and tablets) ---------- */
+body.touch { touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+#touch { position: fixed; inset: 0; z-index: 6; touch-action: none;
+  --safe-l: env(safe-area-inset-left, 0px); --safe-r: env(safe-area-inset-right, 0px); --safe-b: env(safe-area-inset-bottom, 0px); }
+#touch .t-zone { position: absolute; top: 0; bottom: 0; }
+#touch .t-move { left: 0; width: 42%; }
+#touch .t-look { right: 0; width: 58%; }
+#touch .t-stick { position: absolute; width: 124px; height: 124px; margin: -62px 0 0 -62px; border-radius: 50%; pointer-events: none;
+  border: 2px solid rgba(255,255,255,.28); background: radial-gradient(circle, rgba(0,0,0,.18) 0%, rgba(0,0,0,.32) 100%); }
+#touch .t-stick i { position: absolute; left: 50%; top: 50%; width: 54px; height: 54px; border-radius: 50%;
+  background: rgba(233,230,223,.55); box-shadow: 0 0 0 1px rgba(0,0,0,.35); transform: translate(-50%, -50%); }
+#touch .t-stick.sprint { border-color: var(--accent); }
+#touch .t-stick.sprint i { background: var(--accent); }
+#touch .t-btn { position: absolute; border-radius: 50%; border: 1.5px solid rgba(255,255,255,.32); background: rgba(10,12,14,.38);
+  color: rgba(233,230,223,.9); font: 600 13px var(--font); letter-spacing: .08em; display: grid; place-items: center; padding: 0;
+  touch-action: none; backdrop-filter: blur(2px); }
+#touch .t-btn.down { background: rgba(233,230,223,.28); }
+#touch .t-btn.on { border-color: var(--accent); color: var(--accent); background: rgba(232,163,60,.18); }
+/* Right thumb cluster, fire biggest and closest to the thumb's rest */
+#touch .t-fire { width: 86px; height: 86px; right: calc(28px + var(--safe-r)); bottom: calc(92px + var(--safe-b)); border-color: rgba(229,72,59,.75); background: rgba(229,72,59,.2); }
+#touch .t-fire::after { content: ''; width: 26px; height: 26px; border-radius: 50%; border: 2px solid rgba(255,255,255,.8); box-shadow: 0 0 0 4px rgba(255,255,255,.12); }
+#touch .t-fire.down { background: rgba(229,72,59,.45); }
+#touch .t-aim { width: 62px; height: 62px; right: calc(132px + var(--safe-r)); bottom: calc(132px + var(--safe-b)); }
+#touch .t-reload { width: 52px; height: 52px; right: calc(124px + var(--safe-r)); bottom: calc(50px + var(--safe-b)); font-size: 16px; }
+#touch .t-jump { width: 56px; height: 56px; right: calc(36px + var(--safe-r)); bottom: calc(22px + var(--safe-b)); font-size: 22px; }
+#touch .t-crouch { width: 52px; height: 52px; right: calc(196px + var(--safe-r)); bottom: calc(40px + var(--safe-b)); font-size: 22px; }
+#touch .t-swap { width: 52px; height: 52px; right: calc(40px + var(--safe-r)); bottom: calc(196px + var(--safe-b)); font-size: 20px; }
+#touch .t-use { width: 70px; height: 70px; right: calc(210px + var(--safe-r)); bottom: calc(170px + var(--safe-b)); border-color: var(--accent); color: var(--accent); }
+#touch .t-steady { width: 62px; height: 62px; right: calc(214px + var(--safe-r)); bottom: calc(118px + var(--safe-b)); border-color: #7cc4ff; color: #7cc4ff; }
+#touch .t-pause { width: 40px; height: 40px; left: 50%; top: 8px; margin-left: -20px; border-radius: 8px; display: flex; gap: 5px; justify-content: center; align-items: center; }
+#touch .t-pause span { width: 4px; height: 14px; background: currentColor; border-radius: 1px; }
+#touch .hidden { display: none !important; }
+
+/* HUD moved out from under the thumbs */
+body.touch .hud-top { top: 54px; }
+body.touch #hud-title { font-size: 15px; }
+body.touch .hud-br { top: 12px; right: calc(18px + env(safe-area-inset-right, 0px)); bottom: auto; }
+body.touch .ammo b { font-size: 34px; }
+body.touch .ammo span, body.touch .ammo em { font-size: 18px; }
+body.touch .hud-topright { top: 12px; right: calc(170px + env(safe-area-inset-right, 0px)); }
+body.touch #killfeed { top: 96px; }
+body.touch .hud-bl { left: calc(18px + env(safe-area-inset-left, 0px)); top: 12px; bottom: auto; gap: 14px; }
+body.touch .vital b { font-size: 24px; min-width: 40px; }
+body.touch .vital .bar { width: 80px; }
+body.touch #hud-objectives { top: 52px; left: calc(14px + env(safe-area-inset-left, 0px)); max-width: 260px; }
+body.touch #hud-objectives .obj { font-size: 12px; padding: 4px 10px 4px 24px; }
+body.touch #hud-objectives .obj::before { top: 8px; left: 8px; width: 6px; height: 6px; }
+body.touch #hud-subtitle { bottom: 18px; max-width: 46vw; font-size: 13px; }
+body.touch #hud-interact { top: 64%; }
+body.touch #fps { top: auto; bottom: 4px; left: 50%; transform: translateX(-50%); }
+body.touch #banner h2 { font-size: 34px; }
+
+/* Short landscape screens: menus scroll and shrink */
+@media (max-height: 520px) {
+  .screen { justify-content: flex-start; overflow-y: auto; padding: 14px 0; }
+  #menu { justify-content: flex-start; padding-left: max(5vw, env(safe-area-inset-left, 0px)); }
+  .brand { font-size: 40px; }
+  .tagline { margin: 4px 0 12px; font-size: 11px; }
+  .menu-panel { width: min(440px, 92vw); }
+  .menu-panel.narrow { width: min(360px, 92vw); }
+  .menu-panel h1 { font-size: 26px; margin-bottom: 12px; }
+  .menu-list { gap: 4px; margin-top: 10px; }
+  .menu-list button { padding: 8px 14px; }
+  .menu-list button b { font-size: 15px; }
+  .menu-list button small { font-size: 11px; }
+  .setting { margin-bottom: 12px; }
+}
+body.touch .menu-list button:hover { transform: none; }
+.touch-keys { display: none; }
+body.touch .touch-keys { display: table; }
+body.touch .keys:not(.touch-keys) { display: none; }
+body.touch .ctl-hint { font-size: 0 !important; }
+body.touch .ctl-hint::after { content: 'Touch controls'; font-size: 13px; }
+body.touch #hud-interact .interact-key { display: none; }
+body.touch #hud-subtitle { max-width: 40vw; }
+@media (max-height: 520px) { body.touch .ctl-hint::after { font-size: 11px; } }
+
+/* ---------- Developer panel (F2, or ?dev=1) ---------- */
+#devpanel { position: fixed; top: 12px; right: 12px; z-index: 60; width: 300px; max-height: calc(100vh - 24px); overflow-y: auto;
+  background: rgba(10, 12, 14, 0.94); border: 1px solid var(--line); border-top: 2px solid var(--accent); font-size: 13px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.5); -webkit-user-select: none; user-select: none; touch-action: auto; }
+#devpanel header { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+#devpanel header b { letter-spacing: .2em; color: var(--accent); font-size: 13px; }
+#devpanel header span { color: var(--muted); font-size: 11px; flex: 1; }
+#devpanel header button { background: none; border: none; color: var(--text); font-size: 20px; line-height: 1; cursor: pointer; padding: 0 2px; }
+#devpanel section { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+#devpanel h4 { margin: 0 0 8px; font-size: 10px; letter-spacing: .22em; color: var(--muted); text-transform: uppercase; font-weight: 400; }
+#devpanel .dev-row { display: flex; gap: 6px; margin-bottom: 6px; }
+#devpanel .dev-row > * { flex: 1; min-width: 0; }
+#devpanel button, #devpanel select { font: inherit; font-size: 12px; color: var(--text); background: #1b1e22; border: 1px solid #33373d;
+  padding: 7px 8px; cursor: pointer; text-transform: none; }
+#devpanel button:hover { border-color: var(--accent); }
+#devpanel button:active { background: var(--accent-dim); }
+#devpanel select { flex: 2; }
+#devpanel label { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; }
+#devpanel .dev-range output { color: var(--accent); min-width: 44px; text-align: right; }
+#devpanel .dev-range input { flex: 1; }
+#devpanel .dev-quality button { text-transform: capitalize; padding: 6px 4px; }
+#devpanel .dev-note { color: var(--muted); font-size: 11px; line-height: 1.4; margin: 4px 0 0; }
+#devpanel pre { margin: 0; font: 12px/1.5 ui-monospace, Menlo, monospace; color: #b9ff7a; white-space: pre; }
+#devpanel.hidden { display: none !important; }
+#devpanel-open { display: none; position: fixed; z-index: 59; left: 50%; top: 8px; margin-left: 30px; padding: 0 9px; height: 40px;
+  font: 600 11px var(--font); letter-spacing: .14em; color: var(--accent); background: rgba(10,12,14,.6);
+  border: 1px solid rgba(232,163,60,.6); border-radius: 8px; }
+body.touch #devpanel-open { display: block; }
+@media (max-width: 520px), (max-height: 520px) { #devpanel { width: min(300px, calc(100vw - 24px)); top: 8px; right: 8px; } }

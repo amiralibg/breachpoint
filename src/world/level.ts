@@ -111,7 +111,8 @@ export const ENV: Record<'nightRain' | 'dusk' | 'overcast' | 'underground' | 'st
   },
   storm: {
     sunDir: [-0.4, 0.6, 0.6], sunColor: 0x7f9bd0, sunIntensity: 1.3,
-    hemi: [0x4c5f84, 0x1b1f27, 1.05], fog: [0x0d131c, 0.012], fogSun: 0x1c2738,
+    // Fog is the sky's horizon colour: far shapes fade into the storm, not into black cut-outs
+    hemi: [0x4c5f84, 0x1b1f27, 1.05], fog: [0x303845, 0.012], fogSun: 0x3e4554,
     sky: {
       zenith: [0.008, 0.012, 0.024], horizon: [0.03, 0.04, 0.06], horizonSun: [0.05, 0.06, 0.09], glow: [0.06, 0.08, 0.12],
       cloudLit: [0.045, 0.055, 0.08], cloudSun: [0.08, 0.1, 0.14], cloudDark: [0.01, 0.012, 0.02], cover: [0.18, 0.5], cloudAmount: 0.98, disc: 0,

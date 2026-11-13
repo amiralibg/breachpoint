@@ -1,0 +1,179 @@
+{
+ "lowwater": [
+  {
+   "contact": [
+    "lowwater_0_contact_0",
+    "lowwater_0_contact_1",
+    "lowwater_0_contact_2",
+    "lowwater_0_contact_3"
+   ],
+   "reloading": [
+    "lowwater_0_reloading_0",
+    "lowwater_0_reloading_1",
+    "lowwater_0_reloading_2"
+   ],
+   "grenade": [
+    "lowwater_0_grenade_0",
+    "lowwater_0_grenade_1",
+    "lowwater_0_grenade_2"
+   ],
+   "flanking": [
+    "lowwater_0_flanking_0",
+    "lowwater_0_flanking_1",
+    "lowwater_0_flanking_2"
+   ],
+   "lostHim": [
+    "lowwater_0_lostHim_0",
+    "lowwater_0_lostHim_1",
+    "lowwater_0_lostHim_2"
+   ],
+   "manDown": [
+    "lowwater_0_manDown_0",
+    "lowwater_0_manDown_1",
+    "lowwater_0_manDown_2"
+   ],
+   "suppressing": [
+    "lowwater_0_suppressing_0",
+    "lowwater_0_suppressing_1"
+   ]
+  },
+  {
+   "contact": [
+    "lowwater_1_contact_0",
+    "lowwater_1_contact_1",
+    "lowwater_1_contact_2",
+    "lowwater_1_contact_3"
+   ],
+   "reloading": [
+    "lowwater_1_reloading_0",
+    "lowwater_1_reloading_1",
+    "lowwater_1_reloading_2"
+   ],
+   "grenade": [
+    "lowwater_1_grenade_0",
+    "lowwater_1_grenade_1",
+    "lowwater_1_grenade_2"
+   ],
+   "flanking": [
+    "lowwater_1_flanking_0",
+    "lowwater_1_flanking_1",
+    "lowwater_1_flanking_2"
+   ],
+   "lostHim": [
+    "lowwater_1_lostHim_0",
+    "lowwater_1_lostHim_1",
+    "lowwater_1_lostHim_2"
+   ],
+   "manDown": [
+    "lowwater_1_manDown_0",
+    "lowwater_1_manDown_1",
+    "lowwater_1_manDown_2"
+   ],
+   "suppressing": [
+    "lowwater_1_suppressing_0",
+    "lowwater_1_suppressing_1"
+   ]
+  },
+  {
+   "contact": [
+    "lowwater_2_contact_0",
+    "lowwater_2_contact_1",
+    "lowwater_2_contact_2",
+    "lowwater_2_contact_3"
+   ],
+   "reloading": [
+    "lowwater_2_reloading_0",
+    "lowwater_2_reloading_1",
+    "lowwater_2_reloading_2"
+   ],
+   "grenade": [
+    "lowwater_2_grenade_0",
+    "lowwater_2_grenade_1",
+    "lowwater_2_grenade_2"
+   ],
+   "flanking": [
+    "lowwater_2_flanking_0",
+    "lowwater_2_flanking_1",
+    "lowwater_2_flanking_2"
+   ],
+   "lostHim": [
+    "lowwater_2_lostHim_0",
+    "lowwater_2_lostHim_1",
+    "lowwater_2_lostHim_2"
+   ],
+   "manDown": [
+    "lowwater_2_manDown_0",
+    "lowwater_2_manDown_1",
+    "lowwater_2_manDown_2"
+   ],
+   "suppressing": [
+    "lowwater_2_suppressing_0",
+    "lowwater_2_suppressing_1"
+   ]
+  }
+ ],
+ "cordon": [
+  {
+   "contact": [
+    "cordon_0_contact_0",
+    "cordon_0_contact_1",
+    "cordon_0_contact_2"
+   ],
+   "reloading": [
+    "cordon_0_reloading_0",
+    "cordon_0_reloading_1"
+   ],
+   "grenade": [
+    "cordon_0_grenade_0",
+    "cordon_0_grenade_1"
+   ],
+   "flanking": [
+    "cordon_0_flanking_0",
+    "cordon_0_flanking_1"
+   ],
+   "lostHim": [
+    "cordon_0_lostHim_0",
+    "cordon_0_lostHim_1"
+   ],
+   "manDown": [
+    "cordon_0_manDown_0",
+    "cordon_0_manDown_1"
+   ],
+   "suppressing": [
+    "cordon_0_suppressing_0",
+    "cordon_0_suppressing_1"
+   ]
+  },
+  {
+   "contact": [
+    "cordon_1_contact_0",
+    "cordon_1_contact_1",
+    "cordon_1_contact_2"
+   ],
+   "reloading": [
+    "cordon_1_reloading_0",
+    "cordon_1_reloading_1"
+   ],
+   "grenade": [
+    "cordon_1_grenade_0",
+    "cordon_1_grenade_1"
+   ],
+   "flanking": [
+    "cordon_1_flanking_0",
+    "cordon_1_flanking_1"
+   ],
+   "lostHim": [
+    "cordon_1_lostHim_0",
+    "cordon_1_lostHim_1"
+   ],
+   "manDown": [
+    "cordon_1_manDown_0",
+    "cordon_1_manDown_1"
+   ],
+   "suppressing": [
+    "cordon_1_suppressing_0",
+    "cordon_1_suppressing_1"
+   ]
+  }
+ ]
+}

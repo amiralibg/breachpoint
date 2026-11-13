@@ -1,4 +1,5 @@
 import { onProgress } from './core/assets';
+import { devEnabled, devState } from './devflags';
 import { loadSettings, QUALITY_PRESETS, saveSettings, type QualityLevel } from './core/settings';
 import { Game } from './game/game';
 import { CAMPAIGN } from './game/campaign';
@@ -46,7 +47,7 @@ function saveProgress(p: Progress): void {
 
 /** How many chapters are open: every finished one, plus the first unfinished. */
 function unlockedCount(p: Progress): number {
-  if (import.meta.env.DEV && (window as unknown as { __unlock?: boolean }).__unlock) return CAMPAIGN.length;
+  if (devState.unlockAll || (import.meta.env.DEV && (window as unknown as { __unlock?: boolean }).__unlock)) return CAMPAIGN.length;
   let n = 0;
   while (n < CAMPAIGN.length && p[CAMPAIGN[n].id]) n++;
   return Math.min(CAMPAIGN.length, n + 1);
@@ -407,6 +408,28 @@ $('showfps').addEventListener('change', (e) => {
 async function applySettings(): Promise<void> {
   saveSettings(settings);
   await game.applySettings(settings);
+}
+
+// Developer options (F2): in the dev server, or anywhere with ?dev=1
+if (devEnabled()) {
+  void import('./ui/devpanel').then((m) => m.installDevPanel(game, {
+    async startMission(id) {
+      const def = CAMPAIGN.find((c) => c.id === id);
+      if (!def) return;
+      devState.unlockAll = true;
+      if (game.state === 'playing' || game.state === 'paused' || game.state === 'dead') game.quitToMenu();
+      openBriefing(def);
+      // The map loads behind the briefing; deploy as soon as it is ready (fresh, not a resume)
+      const go = $<HTMLButtonElement>('deploy-btn');
+      for (let i = 0; i < 300 && go.disabled; i++) await new Promise((r) => setTimeout(r, 100));
+      show(null);
+      game.start('story', def);
+    },
+    async setQuality(q) {
+      settings = { ...settings, quality: q };
+      await applySettings();
+    },
+  }));
 }
 
 // Debug handle for development (inspect state from the console).

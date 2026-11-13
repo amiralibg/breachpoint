@@ -2,7 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#000000" />
     <title>BREACHPOINT</title>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
@@ -35,7 +39,7 @@
             <b>Practice Range</b><small>Moving targets, infinite ammo, no return fire</small>
           </button>
           <button data-action="settings"><b>Settings</b><small>Graphics quality, mouse, audio</small></button>
-          <button data-action="controls"><b>Controls</b><small>Keyboard and mouse bindings</small></button>
+          <button data-action="controls"><b>Controls</b><small class="ctl-hint">Keyboard and mouse bindings</small></button>
         </nav>
         <p class="credits">Assets: Poly Haven (CC0) · "Classic M4" by jeandiz, "Pistol 9mm - semi auto" by Hitansh_3DArtist, "PGM Ultima Ratio" by flip.3d and "American Soldier Rigged" by matheofrelin3 (Sketchfab, CC BY 4.0) · animations from three.js examples</p>
       </div>
@@ -179,6 +183,19 @@
           <tr><td><kbd>Space</kbd></td><td>Jump</td></tr>
           <tr><td><kbd>Esc</kbd></td><td>Pause</td></tr>
           <tr><td><kbd>F3</kbd></td><td>AI debug overlay</td></tr>
+        </table>
+        <table class="keys touch-keys">
+          <tr><td>Left thumb</td><td>Move (the stick appears where you touch)</td></tr>
+          <tr><td>Push past the ring</td><td>Sprint</td></tr>
+          <tr><td>Right thumb, drag</td><td>Look</td></tr>
+          <tr><td>Red button</td><td>Fire (keep dragging to steer while you shoot)</td></tr>
+          <tr><td>AIM</td><td>Aim down sights (tap on, tap off)</td></tr>
+          <tr><td>R</td><td>Reload</td></tr>
+          <tr><td>⇄</td><td>Next weapon</td></tr>
+          <tr><td>⤒ / ⤓</td><td>Jump / crouch (crouch stays on)</td></tr>
+          <tr><td>USE</td><td>Shows up next to objectives, guns and bodies (hold)</td></tr>
+          <tr><td>HOLD</td><td>On the scope: hold your breath</td></tr>
+          <tr><td>❚❚</td><td>Pause</td></tr>
         </table>
         <nav class="menu-list">
           <button data-action="back" class="primary"><b>Back</b></button>
